@@ -1,0 +1,12 @@
+# docker-compose.dev.yml — Development overrides
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up kafka kafka-ui
+
+version: "3.9"
+services:
+  kafka:
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+  kafka-ui:
+    ports:
+      - "8080:8080"

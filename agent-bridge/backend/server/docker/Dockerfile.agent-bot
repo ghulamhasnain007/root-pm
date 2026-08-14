@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies from the agent-bridge requirements
+COPY agent-bridge/requirements.txt /tmp/agent-requirements.txt
+# Add kafka-python for the consumer
+RUN pip install --no-cache-dir -r /tmp/agent-requirements.txt kafka-python>=2.0.0
+
+# Copy agent-bridge source
+COPY agent-bridge/ ./agent-bridge/
+
+# Copy kafka-bridge consumer
+COPY kafka-bridge/python-consumer/ ./kafka-bridge/python-consumer/
+
+WORKDIR /app/agent-bridge
+CMD ["python", "main.py", "--config", "backend/data/config.json"]

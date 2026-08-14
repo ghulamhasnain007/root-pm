@@ -1,0 +1,164 @@
+"""
+memory/meeting_memory.py
+────────────────────────
+Injects meeting context from Kafka events into the agent's per-channel
+memory (the ChannelMemoryStore in agent/agent.py).
+
+When a meeting ends, a rich summary is built from the full transcript and
+injected as a SystemMessage into the channel's message history. This means
+when a developer types "@bot create a task for the auth bug Alice mentioned"
+— the agent already has the entire meeting transcript in its context window
+and can resolve "Alice" and "the auth bug" without asking.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+
+from langchain_core.messages import SystemMessage, HumanMessage
+
+logger = logging.getLogger("agent_bridge.meeting_memory")
+
+
+def _fmt_timestamp(ts_ms: int) -> str:
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+    return dt.strftime("%H:%M:%S UTC")
+
+
+def build_meeting_summary_message(event: dict) -> SystemMessage:
+    """
+    Convert a meeting.ended event into a SystemMessage that gets injected
+    into the channel's conversation history.
+    """
+    summary   = event.get("summary", {})
+    meeting_id = event.get("meetingId", "unknown")
+    channel_id = event.get("channelId", "unknown")
+    ended_at   = event.get("endedAt", 0)
+    duration_ms = event.get("durationMs", 0)
+    duration_min = round(duration_ms / 60_000, 1)
+
+    participants = summary.get("participants", [])
+    tasks_created = summary.get("tasksCreated", [])
+    tasks_closed  = summary.get("tasksClosed", [])
+    full_transcript = summary.get("fullTranscript", [])
+
+    # ── Build the transcript text ─────────────────────────────────────────────
+    lines = []
+    for entry in full_transcript:
+        role    = entry.get("role", "user")
+        speaker = entry.get("speakerName", "Assistant" if role == "assistant" else "Unknown")
+        text    = entry.get("text", "").strip()
+        ts      = _fmt_timestamp(entry.get("timestamp", 0))
+        if text:
+            lines.append(f"  [{ts}] {speaker}: {text}")
+
+    transcript_text = "\n".join(lines) if lines else "  (no transcript recorded)"
+
+    participant_names = ", ".join(p.get("name", "?") for p in participants) or "unknown"
+
+    tasks_section = ""
+    if tasks_created:
+        tasks_section += f"\nTasks CREATED during this meeting: {', '.join(tasks_created)}"
+    if tasks_closed:
+        tasks_section += f"\nTasks CLOSED during this meeting: {', '.join(tasks_closed)}"
+
+    content = f"""[MEETING CONTEXT — injected automatically]
+Meeting ID: {meeting_id}
+Voice channel: {channel_id}
+Ended at: {_fmt_timestamp(ended_at)}
+Duration: {duration_min} minutes
+Participants ({len(participants)}): {participant_names}{tasks_section}
+
+FULL TRANSCRIPT:
+{transcript_text}
+
+[END OF MEETING CONTEXT]
+This context is available for you to reference when answering questions or creating tasks.
+"""
+
+    return SystemMessage(content=content)
+
+
+def build_transcript_chunk_message(event: dict) -> HumanMessage | None:
+    """
+    Optional: inject individual transcript lines as they arrive (streaming context).
+    Only used when real-time context injection is enabled.
+    """
+    text = event.get("text", "").strip()
+    if not text:
+        return None
+    role   = event.get("role", "user")
+    speaker = event.get("speakerName", "Voice bot" if role == "assistant" else "Unknown")
+    ts     = _fmt_timestamp(event.get("timestamp", 0))
+    return HumanMessage(content=f"[Live meeting transcript — {speaker} at {ts}]: {text}")
+
+
+class MeetingMemoryInjector:
+    """
+    Receives Kafka events and injects meeting context into the agent's
+    ChannelMemoryStore.
+
+    Wire-up in main.py:
+        injector = MeetingMemoryInjector(memory_store, channel_map)
+        consumer.on("meeting.ended",      injector.on_meeting_ended)
+        consumer.on("meeting.transcript", injector.on_transcript)    # optional streaming
+        consumer.on("meeting.started",    injector.on_meeting_started)
+    """
+
+    def __init__(self, memory_store, channel_map: dict[str, str],
+                 inject_live_transcript: bool = False):
+        """
+        memory_store: the ChannelMemoryStore instance from agent/agent.py
+        channel_map:  {voice_channel_id → discord_text_channel_id}
+                      Routes meeting events to the right text channel's memory.
+        inject_live_transcript: if True, inject each transcript line in real time.
+        """
+        self._memory  = memory_store
+        self._map     = channel_map
+        self._live    = inject_live_transcript
+
+    def _target_channel(self, voice_channel_id: str) -> str | None:
+        """Map a voice channel to the Discord text channel whose memory we update."""
+        return self._map.get(str(voice_channel_id))
+
+    def on_meeting_started(self, event: dict) -> None:
+        channel_id = event.get("channelId", "")
+        target     = self._target_channel(channel_id)
+        participants = [p.get("name", "?") for p in event.get("participants", [])]
+        logger.info("Meeting started in channel %s → injecting start notice into %s",
+                    channel_id, target or "nowhere")
+        if not target:
+            return
+        notice = SystemMessage(content=(
+            f"[MEETING STARTED in voice channel {channel_id}] "
+            f"Participants: {', '.join(participants) or 'unknown'}. "
+            f"Meeting ID: {event.get('meetingId', '?')}. "
+            f"Tasks discussed in this meeting will appear in context when it ends."
+        ))
+        self._memory.append(target, [notice])
+
+    def on_transcript(self, event: dict) -> None:
+        if not self._live:
+            return
+        channel_id = event.get("channelId", "")
+        target     = self._target_channel(channel_id)
+        if not target:
+            return
+        msg = build_transcript_chunk_message(event)
+        if msg:
+            self._memory.append(target, [msg])
+
+    def on_meeting_ended(self, event: dict) -> None:
+        channel_id = event.get("channelId", "")
+        target     = self._target_channel(channel_id)
+        logger.info("Meeting ended in channel %s → injecting full summary into memory channel %s",
+                    channel_id, target or "nowhere (no mapping)")
+        if not target:
+            logger.warning(
+                "No text channel mapped for voice channel %s. "
+                "Add it to VOICE_TO_TEXT_CHANNEL_MAP in config.", channel_id)
+            return
+        summary_msg = build_meeting_summary_message(event)
+        self._memory.append(target, [summary_msg])
+        logger.info("Meeting summary injected into channel %s memory (%d transcript lines)",
+                    target, event.get("summary", {}).get("transcriptLineCount", 0))

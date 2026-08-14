@@ -1,0 +1,172 @@
+version: "3.9"
+
+# ── Agent Bridge — Full Event-Driven Stack ────────────────────────────────────
+#
+# Services:
+#   kafka          — Single-node Kafka (KRaft, no Zookeeper)
+#   kafka-ui       — Web UI to inspect topics/messages
+#   agent-bot      — Python Discord bot (agent-bridge)
+#   kafka-consumer — Python Kafka consumer (voice→Taiga sync + memory)
+#   config-api     — FastAPI admin dashboard API
+#   voice-bot      — Node.js scrum-master-ai voice bot
+#
+# Start everything:   docker compose up -d
+# Logs:               docker compose logs -f agent-bot kafka-consumer
+# Stop:               docker compose down
+
+services:
+
+  # ── Kafka (KRaft — no Zookeeper needed) ─────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: agent-bridge-kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"       # internal broker
+      - "9093:9093"       # external / host access
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9094,EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9094
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168          # 7 days
+      KAFKA_LOG_RETENTION_BYTES: 1073741824   # 1 GB
+      KAFKA_CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - bridge-net
+
+  # ── Kafka topic initialiser (runs once, creates topics with correct config) ──
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: agent-bridge-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo 'Creating Kafka topics...'
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic agent-bridge.task-events \
+        --partitions 4 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic agent-bridge.meeting-events \
+        --partitions 4 \
+        --replication-factor 1 \
+        --config retention.ms=604800000
+      echo 'Topics created:'
+      kafka-topics --bootstrap-server kafka:9092 --list
+      "
+    networks:
+      - bridge-net
+
+  # ── Kafka UI (optional but very useful for debugging) ─────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: agent-bridge-kafka-ui
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: agent-bridge
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - bridge-net
+
+  # ── Python Discord bot (agent-bridge) ────────────────────────────────────
+  agent-bot:
+    build:
+      context: ../..
+      dockerfile: kafka-bridge/docker/Dockerfile.agent-bot
+    container_name: agent-bridge-bot
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_BRIDGE_ROOT: /app/kafka-bridge/python-consumer
+    volumes:
+      - ../backend/data:/app/backend/data:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - bridge-net
+
+  # ── Python Kafka consumer (standalone mode — optional) ────────────────────
+  # Use this ONLY if you want the Kafka bridge in a separate process.
+  # When KAFKA_BROKERS is set, agent-bot already runs the consumer inline.
+  # Uncomment if you need separate scaling or isolation.
+  #
+  # kafka-consumer:
+  #   build:
+  #     context: ../..
+  #     dockerfile: kafka-bridge/docker/Dockerfile.kafka-consumer
+  #   container_name: agent-bridge-kafka-consumer
+  #   restart: unless-stopped
+  #   env_file: ../.env
+  #   environment:
+  #     KAFKA_BROKERS: kafka:9092
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #   networks:
+  #     - bridge-net
+
+  # ── FastAPI config dashboard ──────────────────────────────────────────────
+  config-api:
+    build:
+      context: ../..
+      dockerfile: kafka-bridge/docker/Dockerfile.config-api
+    container_name: agent-bridge-config-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: ../.env
+    volumes:
+      - ../backend/data:/app/backend/data
+    networks:
+      - bridge-net
+
+  # ── Voice bot (scrum-master-ai) ───────────────────────────────────────────
+  voice-bot:
+    build:
+      context: ../../scrum-master-ai/backend
+      dockerfile: Dockerfile
+    container_name: scrum-master-ai-bot
+    restart: unless-stopped
+    env_file: ../../scrum-master-ai/backend/.env
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: scrum-master-ai
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - bridge-net
+
+volumes:
+  kafka-data:
+
+networks:
+  bridge-net:
+    driver: bridge

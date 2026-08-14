@@ -1,0 +1,172 @@
+version: "3.9"
+
+# ── Full Event-Driven Stack ───────────────────────────────────────────────────
+# Services: Kafka (KRaft) · Kafka UI · voice bot · voice frontend ·
+#           agent-bridge bot · agent-bridge config API · agent-bridge dashboard
+#
+# Usage:
+#   docker compose up -d                   start everything
+#   docker compose logs -f voice-bot       voice bot logs
+#   docker compose logs -f agent-bot       text bot logs
+#   docker compose down                    stop everything
+
+services:
+
+  # ── Kafka (KRaft — no Zookeeper) ─────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: project-kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9094,EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9094
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+      KAFKA_CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - project-net
+
+  # ── Kafka topic initialiser ───────────────────────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: project-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic agent-bridge.task-events --partitions 4 --replication-factor 1 \
+        --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists \
+        --topic agent-bridge.meeting-events --partitions 4 --replication-factor 1 \
+        --config retention.ms=604800000
+      echo Topics ready.
+      "
+    networks:
+      - project-net
+
+  # ── Kafka UI ──────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: project-kafka-ui
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: project
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - project-net
+
+  # ── Voice bot backend (scrum-master-ai) ───────────────────────────────────
+  voice-bot:
+    build:
+      context: ../scrum-master-ai/backend
+      dockerfile: Dockerfile
+    container_name: voice-bot
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: scrum-master-ai
+      PORT: 3001
+      HOST: 0.0.0.0
+    ports:
+      - "3001:3001"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - project-net
+
+  # ── Voice bot frontend ────────────────────────────────────────────────────
+  voice-frontend:
+    build:
+      context: ../scrum-master-ai/frontend
+      dockerfile: Dockerfile
+    container_name: voice-frontend
+    restart: unless-stopped
+    env_file: ../scrum-master-ai/frontend/.env
+    ports:
+      - "5173:80"
+    networks:
+      - project-net
+
+  # ── Agent Bridge text bot ─────────────────────────────────────────────────
+  agent-bot:
+    build:
+      context: ../agent-bridge
+      dockerfile: backend/server/Dockerfile.bot
+    container_name: agent-bot
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_BRIDGE_ROOT: /app/backend/python-consumer
+    volumes:
+      - ../agent-bridge/backend/data:/app/backend/data:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - project-net
+
+  # ── Agent Bridge config API ───────────────────────────────────────────────
+  config-api:
+    build:
+      context: ../agent-bridge
+      dockerfile: backend/server/Dockerfile.api
+    container_name: config-api
+    restart: unless-stopped
+    env_file: ../.env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../agent-bridge/backend/data:/app/backend/data
+    networks:
+      - project-net
+
+  # ── Agent Bridge dashboard (React) ────────────────────────────────────────
+  agent-dashboard:
+    build:
+      context: ../agent-bridge/frontend
+      dockerfile: Dockerfile
+    container_name: agent-dashboard
+    restart: unless-stopped
+    ports:
+      - "5174:80"
+    networks:
+      - project-net
+
+volumes:
+  kafka-data:
+
+networks:
+  project-net:
+    driver: bridge

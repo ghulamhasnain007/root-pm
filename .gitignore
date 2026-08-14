@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment (never commit secrets)
+.env
+scrum-master-ai/backend/.env
+scrum-master-ai/frontend/.env
+agent-bridge/.env
+agent-bridge/backend/.env
+
+# Runtime data
+agent-bridge/backend/data/config.json
+kafka-data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
