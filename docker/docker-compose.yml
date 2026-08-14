@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ── Full Event-Driven Stack ───────────────────────────────────────────────────
 # Services: Kafka (KRaft) · Kafka UI · voice bot · voice frontend ·
 #           agent-bridge bot · agent-bridge config API · agent-bridge dashboard
