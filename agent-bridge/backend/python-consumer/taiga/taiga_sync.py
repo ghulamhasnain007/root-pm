@@ -38,6 +38,7 @@ class TaigaSyncHandler:
     Wire-up in main.py:
         handler = TaigaSyncHandler(taiga_platform, project_slug)
         consumer.on("task.created", handler.on_task_created)
+        consumer.on("task.updated", handler.on_task_updated)
         consumer.on("task.closed",  handler.on_task_closed)
     """
 
@@ -132,3 +133,90 @@ class TaigaSyncHandler:
 
         except Exception as e:
             logger.error("Failed to sync task.closed to Taiga: %s (event=%s)", e, event, exc_info=True)
+
+    def _find_open_item(self, project_id: str, title: str) -> object | None:
+        """Search open Taiga items by title; return the best-scoring match."""
+        results = self._pm.search_items(project_id, title)
+        open_matches = [
+            r for r in results
+            if r.status.lower() not in ("done", "closed", "cancelled")
+            and title.lower() in r.subject.lower()
+        ]
+        if not open_matches:
+            return None
+        return min(open_matches, key=lambda r: abs(len(r.subject) - len(title)))
+
+    def _resolve_assignee_id(self, project_id: str, name: str) -> int | None:
+        """Resolve a freeform assignee name to a Taiga user id, or None."""
+        target = name.strip().lower()
+        if not target:
+            return None
+        members = self._pm.list_members(project_id)
+        exact = next(
+            (m for m in members
+             if m.get("username", "").lower() == target
+             or m.get("full_name", "").lower() == target),
+            None
+        )
+        if exact:
+            return exact["id"]
+        partial = next(
+            (m for m in members if target in m.get("username", "").lower()),
+            None
+        )
+        return partial["id"] if partial else None
+
+    def on_task_updated(self, event: dict) -> None:
+        """Mirror a voice-updated task (rename, description or assignee) into Taiga."""
+        try:
+            project_id = self._get_project_id()
+            task_id    = event.get("taskId", "?")
+            changes    = event.get("changes", {}) or {}
+
+            # Locate the item: a rename means Taiga still holds the OLD title,
+            # so prefer previousTitle when it exists.
+            match_key = event.get("previousTitle") or event.get("title") or ""
+            if not match_key.strip():
+                logger.warning("task.updated event missing title/previousTitle — skipping")
+                return
+
+            target = self._find_open_item(project_id, match_key)
+            if target is None:
+                logger.warning(
+                    "task.updated: no open Taiga item matching '%s' (mongo_id=%s)",
+                    match_key, task_id)
+                return
+
+            fields: dict[str, object] = {}
+            new_title = (changes.get("title") or "").strip()
+            if new_title and new_title.lower() != target.subject.lower():
+                fields["subject"] = new_title
+
+            description = changes.get("description")
+            if description is not None:
+                fields["description"] = description or ""
+
+            assignee = (changes.get("assignee") or "").strip()
+            if assignee:
+                member_id = self._resolve_assignee_id(project_id, assignee)
+                if member_id is None:
+                    logger.warning(
+                        "task.updated: assignee '%s' not found in project members — "
+                        "item %s left unassigned (mongo_id=%s)", assignee, target.item_id, task_id)
+                else:
+                    fields["assigned_to"] = member_id
+
+            if not fields:
+                logger.info(
+                    "task.updated: no effective changes for item #%s '%s' (mongo_id=%s)",
+                    target.item_id, target.subject, task_id)
+                return
+
+            item = self._pm.update_item(project_id, target.item_id, fields)
+            logger.info(
+                "task.updated → Updated Taiga item #%s '%s' (fields=%s, mongo_id=%s)",
+                item.item_id, item.subject, list(fields.keys()), task_id
+            )
+
+        except Exception as e:
+            logger.error("Failed to sync task.updated to Taiga: %s (event=%s)", e, event, exc_info=True)

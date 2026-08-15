@@ -28,6 +28,31 @@ docker logs voice-bot | grep Kafka
 
 If KAFKA_BROKERS is unset, the voice bot silently falls back to MongoDB-only.
 
+## Voice bot not writing to Taiga
+
+The voice bot writes straight to Taiga when all of `TAIGA_URL`, `TAIGA_USER`,
+`TAIGA_PASS` and `TAIGA_PROJECT_SLUG` are set — check the startup log line:
+
+```bash
+docker logs voice-bot | grep -i "store="
+```
+
+Otherwise it uses `KafkaTaskStore` (MongoDB + Kafka) and the agent-bridge bot's
+`TaigaSyncHandler` mirrors task created/updated/closed to Taiga.
+
+## Chat agent has no meeting context
+
+Meeting transcripts only reach the chat agent when the Kafka bridge runs inside
+the agent-bot process (it shares the agent's memory store). Confirm:
+
+```bash
+docker logs agent-bot | grep "Kafka bridge active"
+```
+
+If the line says `KAFKA_BROKERS not set` the bot process can't consume meeting
+events. Also verify `VOICE_TO_TEXT_CHANNEL_MAP` maps the voice channel to the
+text channel whose memory the agent reads.
+
 ## Common errors
 
 | Error | Cause | Fix |

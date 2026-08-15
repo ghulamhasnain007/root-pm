@@ -47,6 +47,12 @@ export interface TaskUpdatedEvent {
   publishedAt: number;
   taskId: string;
   orgId: string;
+  /** Current title (after the change). Consumers use this to locate the
+   *  mirrored item when only assignee/description/status changed. */
+  title?: string;
+  /** Title before the change — required for consumers to find the item
+   *  when it was renamed (the old title still exists in Taiga). */
+  previousTitle?: string;
   changes: Partial<{ title: string; description: string; assignee: string; status: 'open' | 'closed' }>;
   updatedBy: string;
   sourceChannelId: string;

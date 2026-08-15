@@ -14,10 +14,10 @@
  * failure never breaks the voice bot's task response.
  */
 import { MongoTaskStore } from '../services/tasks/MongoTaskStore.js';
-import type { TaskStore, Task, TaskInput } from '../services/tasks/TaskStore.js';
+import type { TaskStore, Task, TaskInput, TaskChanges } from '../services/tasks/TaskStore.js';
 import type { KafkaBridgeProducer } from '../kafka/KafkaProducer.js';
 import { TOPICS, SCHEMA_VERSION } from '../kafka/events.js';
-import type { TaskCreatedEvent, TaskClosedEvent } from '../kafka/events.js';
+import type { AnyBridgeEvent, TaskCreatedEvent, TaskClosedEvent, TaskUpdatedEvent } from '../kafka/events.js';
 
 export class KafkaTaskStore implements TaskStore {
   private mongo: MongoTaskStore;
@@ -77,6 +77,48 @@ export class KafkaTaskStore implements TaskStore {
     return task;
   }
 
+  async update(orgId: string, taskIdOrTitle: string, changes: TaskChanges): Promise<Task | null> {
+    // Capture the title before the change so the Taiga mirror can still
+    // find the item when this update renames it (Taiga still has the old).
+    const before = await this.findByTitleOrId(orgId, taskIdOrTitle);
+    const task = await this.mongo.update(orgId, taskIdOrTitle, changes);
+    if (!task) return null;
+
+    const eventChanges: TaskUpdatedEvent['changes'] = {};
+    if (changes.title !== undefined) eventChanges.title = changes.title;
+    if (changes.description !== undefined) eventChanges.description = changes.description;
+    if (changes.assignee !== undefined) eventChanges.assignee = changes.assignee;
+
+    const event: TaskUpdatedEvent = {
+      schemaVersion: SCHEMA_VERSION,
+      eventType:     'task.updated',
+      sourceSystem:  'scrum-master-ai',
+      publishedAt:   Date.now(),
+      taskId:        task.id,
+      orgId:         task.orgId,
+      title:         task.title,
+      previousTitle: before?.title,
+      changes:       eventChanges,
+      updatedBy:     'voice-bot',
+      sourceChannelId: task.sourceChannelId,
+    };
+    this.safePublish(TOPICS.TASK_EVENTS, event, `${orgId}:${task.sourceChannelId}`);
+
+    return task;
+  }
+
+  /** Same id-then-title matching rules as close(), used to snapshot the
+   *  pre-update task for the task.updated event. */
+  private async findByTitleOrId(orgId: string, idOrTitle: string): Promise<Task | null> {
+    const open = await this.mongo.list(orgId, 'open');
+    const needle = idOrTitle.trim().toLowerCase();
+    return (
+      open.find(t => t.id === idOrTitle) ??
+      open.find(t => t.title.toLowerCase().includes(needle)) ??
+      null
+    );
+  }
+
   // list/get — pure read, no Kafka event needed
   async list(orgId: string, status?: 'open' | 'closed'): Promise<Task[]> {
     return this.mongo.list(orgId, status);
@@ -86,7 +128,7 @@ export class KafkaTaskStore implements TaskStore {
     return this.mongo.get(orgId, id);
   }
 
-  private safePublish(topic: string, event: TaskCreatedEvent | TaskClosedEvent, key: string): void {
+  private safePublish(topic: string, event: AnyBridgeEvent, key: string): void {
     this.producer.publish(topic, event, key).catch(err => {
       console.error('[KafkaTaskStore] Failed to publish event', event.eventType, err?.message);
     });

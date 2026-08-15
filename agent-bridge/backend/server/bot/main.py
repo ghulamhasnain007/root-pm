@@ -154,6 +154,37 @@ async def main(config_path: str) -> None:
     # ── Wire the message callback ────────────────────────────────────────────
     comm.set_message_callback(bridge.handle)
 
+    # ── Kafka bridge (voice bot → Taiga sync + meeting memory) ──────────────
+    # Runs the python-consumer in-process so it shares bridge._memory: meeting
+    # transcripts injected by MeetingMemoryInjector land in the SAME
+    # ChannelMemoryStore the chat agent reads. Without this the consumer runs
+    # standalone with its own memory and the chat agent never sees meetings.
+    consumer_root = os.environ.get(
+        "AGENT_BRIDGE_CONSUMER_ROOT",
+        os.environ.get(
+            "KAFKA_BRIDGE_ROOT",
+            str(Path(__file__).resolve().parents[2] / "python-consumer"),
+        ),
+    )
+    kafka_consumer = None
+    if os.environ.get("KAFKA_BROKERS"):
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "kafka_bridge_main", os.path.join(consumer_root, "main.py"))
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["kafka_bridge_main"] = mod
+            spec.loader.exec_module(mod)
+            kafka_consumer = mod.start_kafka_bridge(memory_store=bridge._memory)
+            if kafka_consumer:
+                logger.info(
+                    "Kafka bridge active — voice events sync to Taiga and "
+                    "meeting transcripts are shared with the chat agent")
+        except Exception as e:
+            logger.warning("Could not start Kafka bridge: %s — continuing without it", e)
+    else:
+        logger.info("KAFKA_BROKERS not set — Kafka bridge disabled")
+
     logger.info("=" * 60)
     logger.info("Agent Bridge starting")
     logger.info("  Communication : %s", comm_id)
@@ -170,6 +201,8 @@ async def main(config_path: str) -> None:
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        if kafka_consumer:
+            kafka_consumer.stop()
         await comm.stop()
 
 

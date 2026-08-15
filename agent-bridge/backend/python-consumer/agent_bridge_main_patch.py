@@ -1,33 +1,15 @@
 """
 agent_bridge_main_patch.py
 ──────────────────────────
-This file shows the PATCH to agent-bridge/main.py to start the Kafka
-bridge in the same process as the Discord bot.
+SUPERSEDED — the Kafka bridge is now started in-process by
+agent-bridge/backend/server/bot/main.py (search for "Kafka bridge (voice bot").
 
-Changes are 3 lines: import start_kafka_bridge, call it after building
-the AgentBridge, pass the shared memory_store.
+That implementation launches the python-consumer via importlib in the same
+process as the Discord bot and passes bridge._memory so meeting transcripts
+injected by MeetingMemoryInjector land in the SAME ChannelMemoryStore the
+chat agent reads.
 
-APPLY THIS DIFF to agent-bridge/main.py:
-
-+ # ── Kafka bridge (voice bot → Taiga sync + meeting memory) ──────────────
-+ import sys, os
-+ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'kafka-bridge', 'python-consumer'))
-+ from main import start_kafka_bridge    # kafka-bridge/python-consumer/main.py
-
-  # ... existing agent setup ...
-
-  bridge = AgentBridge(
-      comm_platform=comm, pm_platform=pm,
-      gemini_api_key=gemini_key, ...
-  )
-
-+ # Start Kafka consumer in background — shares memory_store with agent
-+ kafka_consumer = start_kafka_bridge(memory_store=bridge._memory)
-+ if kafka_consumer:
-+     logger.info("Kafka bridge active — voice events will sync to Taiga and inject into memory")
-
-  comm.set_message_callback(bridge.handle)
-  await comm.start()
+This file is kept only for history of the approach.
 """
 
 # ── FULL REPLACEMENT agent-bridge/main.py ─────────────────────────────────────

@@ -38,6 +38,9 @@ You help the team manage their work in {pm_platform}.
 - Open Tasks: {open_tasks}  |  Open Issues: {open_issues}  |  Open Stories: {open_stories}
 - Team members: {members}
 
+## Recent meeting context
+{meetings}
+
 ## Guidelines
 - Use available tools to perform actions — never fabricate IDs or data.
 - If a request is ambiguous, ask ONE short clarifying question before acting.
@@ -45,6 +48,8 @@ You help the team manage their work in {pm_platform}.
 - Keep replies concise and clear. Use ✅ for success, ❌ for errors.
 - When you create or close an item, always include the item ID and URL if available.
 - If you cannot find a user by username, call list_members first.
+- You may reference details from the meeting transcripts above (people, decisions,
+  tasks discussed) when answering — prefer them over guessing.
 - Today you are speaking with: {author_name} (permission tier: {tier})
 """
 
@@ -113,6 +118,20 @@ class ChannelMemoryStore:
 
     def clear(self, channel_id: str) -> None:
         self._store.pop(channel_id, None)
+
+    def get_meeting_context(self, channel_id: str) -> list[str]:
+        """
+        Return the raw text of every injected meeting summary
+        ("[MEETING CONTEXT ...]" SystemMessages) for a channel, oldest first.
+        These are surfaced to the agent through the system prompt so context
+        survives even after the last-30-messages ring buffer drops them.
+        """
+        buf = self.get(channel_id)
+        return [
+            m.content
+            for m in buf
+            if isinstance(m, SystemMessage) and m.content.startswith("[MEETING CONTEXT")
+        ]
 
 
 # ── ReAct tool-calling loop ───────────────────────────────────────────────────
@@ -262,6 +281,10 @@ class AgentBridge:
             for m in (ctx.members if ctx else [])
         ) or "No member data available"
 
+        meetings_text = "\n\n".join(
+            self._memory.get_meeting_context(incoming.channel_id)[-3:]
+        ) or "No meeting context recorded yet for this channel."
+
         system_text = SYSTEM_PROMPT.format(
             comm_platform  = self.comm.display_name,
             pm_platform    = self.pm.display_name,
@@ -272,12 +295,21 @@ class AgentBridge:
             open_issues    = ctx.open_issue_count if ctx else "?",
             open_stories   = ctx.open_story_count if ctx else "?",
             members        = member_list,
+            meetings       = meetings_text,
             author_name    = incoming.author_name,
             tier           = tier,
         )
 
         # ── 6. Retrieve channel memory ───────────────────────────────────────
         history = self._memory.get(incoming.channel_id)
+        # Meeting transcripts are surfaced through the system prompt section
+        # above — drop the full SystemMessage copies from history so the same
+        # transcript isn't fed through twice.
+        history = [
+            m for m in history
+            if not (isinstance(m, SystemMessage)
+                    and m.content.startswith("[MEETING CONTEXT"))
+        ]
 
         # Full message list: system + history + new user message
         all_messages: list[BaseMessage] = (

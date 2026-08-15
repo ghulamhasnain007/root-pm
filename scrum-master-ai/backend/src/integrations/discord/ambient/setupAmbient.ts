@@ -17,6 +17,10 @@ import { KafkaTaskStore } from '../../../tasks/KafkaTaskStore.js';
 import { MeetingEventPublisher } from '../../../meeting/MeetingEventPublisher.js';
 import { v4 as uuidv4 } from 'uuid';
 
+// ── Taiga integration (direct PM-platform access) ───────────────────────────
+import { config, isTaigaConfigured } from '../../../config/index.js';
+import { TaigaTaskStore } from '../../../services/tasks/TaigaTaskStore.js';
+
 // Matches the single-org simplification used throughout the integrations
 // module.
 const ORG_ID = 'default';
@@ -71,21 +75,28 @@ export async function setupAmbientAssistant(
 
   // ── Task store ────────────────────────────────────────────────────────────
   //
-  // KafkaTaskStore is intended to be a drop-in replacement for
-  // MongoTaskStore:
-  //
-  //   create/update/close -> MongoDB
-  //                         +
-  //                         Kafka event
-  //
-  // Without Kafka, preserve the original Mongo-only behavior.
-  const taskStore = kafkaProducer
-    ? new KafkaTaskStore(
-        kafkaProducer,
-        ORG_ID,
-        () => meetingPublisher?.getMeetingId()
-      )
-    : new MongoTaskStore();
+  // Store precedence:
+  //   1. TaigaTaskStore  — when TAIGA_URL/USER/PASS/PROJECT_SLUG are set.
+  //      Reads AND writes go straight to the real PM platform, so the voice
+  //      bot can update/assign, list, and query sprints against Taiga.
+  //   2. KafkaTaskStore  — MongoDB + Kafka events; the agent-bridge consumer
+  //      mirrors created/closed/updated to Taiga.
+  //   3. MongoTaskStore  — original Mongo-only behavior (no Kafka, no Taiga).
+  const taigaConfigured = isTaigaConfigured();
+  const taskStore = taigaConfigured
+    ? new TaigaTaskStore({
+        url: config.taiga.url,
+        username: config.taiga.username,
+        password: config.taiga.password,
+        projectSlug: config.taiga.projectSlug,
+      })
+    : kafkaProducer
+      ? new KafkaTaskStore(
+          kafkaProducer,
+          ORG_ID,
+          () => meetingPublisher?.getMeetingId()
+        )
+      : new MongoTaskStore();
 
   // ── Task action handler ───────────────────────────────────────────────────
   //
@@ -184,9 +195,14 @@ export async function setupAmbientAssistant(
   });
 
   // ── Startup logging ────────────────────────────────────────────────────────
+  const storeMode = taigaConfigured
+    ? 'TaigaTaskStore (direct Taiga access)'
+    : kafkaProducer
+      ? 'KafkaTaskStore (MongoDB + Kafka events)'
+      : 'MongoTaskStore (MongoDB only)';
   fastify.log.info(
     kafkaProducer
-      ? '[integrations] ambient assistant enabled (presence + Gemini + task actions + Kafka events)'
-      : '[integrations] ambient assistant enabled (presence + Gemini + task actions, Kafka disabled)'
+      ? `[integrations] ambient assistant enabled (presence + Gemini + task actions, store=${storeMode}, Kafka events on)`
+      : `[integrations] ambient assistant enabled (presence + Gemini + task actions, store=${storeMode}, Kafka disabled)`
   );
 }

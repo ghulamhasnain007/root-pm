@@ -23,6 +23,11 @@ export interface Task {
 
 export type TaskInput = Omit<Task, 'id' | 'orgId' | 'status' | 'createdAt' | 'closedAt'>;
 
+/** Editable fields for an existing task. `assignee` is either a Taiga
+ *  username or a display name that gets resolved against the project's
+ *  membership list (same loose matching the close() path uses for titles). */
+export type TaskChanges = Partial<Pick<Task, 'title' | 'description' | 'assignee'>>;
+
 export interface TaskStore {
   create(orgId: string, input: TaskInput): Promise<Task>;
   /** Matches by exact id first, then falls back to a case-insensitive
@@ -30,6 +35,27 @@ export interface TaskStore {
    *  reliably produce an exact task id, so title matching is the practical
    *  path for "close the login bug task." */
   close(orgId: string, taskIdOrTitle: string): Promise<Task | null>;
+  /** Matches by id then title (same rules as close), applies only the
+   *  fields present in `changes`, and returns the updated task. This is
+   *  what powers "assign task 3 to Alice" and "change the title". */
+  update(orgId: string, taskIdOrTitle: string, changes: TaskChanges): Promise<Task | null>;
   list(orgId: string, status?: 'open' | 'closed'): Promise<Task[]>;
   get(orgId: string, id: string): Promise<Task | null>;
+}
+
+/**
+ * Optional PM-platform surface. Only TaigaTaskStore implements this — it
+ * lets the voice bot answer sprint/member queries with real data instead of
+ * being limited to the task store's own slice. Tools that need it degrade
+ * gracefully when a plain Mongo/Kafka store is in use.
+ */
+export interface TaskStorePmSurface {
+  getProjectLabel(): Promise<string>;
+  getActiveSprint(): Promise<Record<string, unknown> | null>;
+  listMembers(): Promise<Array<Record<string, string | number>>>;
+}
+
+export function isPmSurfaceStore(store: TaskStore): store is TaskStore & TaskStorePmSurface {
+  const surface = store as Partial<TaskStorePmSurface>;
+  return typeof surface.getActiveSprint === 'function' && typeof surface.listMembers === 'function';
 }

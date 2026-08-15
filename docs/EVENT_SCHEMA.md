@@ -18,6 +18,17 @@ Consumed by agent-bridge → creates item in Taiga.
 Published when the voice bot closes a task.
 Consumed by agent-bridge → closes item in Taiga.
 
+## task.updated
+Published when the voice bot updates a task (rename, description change, or
+assignment via `update_task`). Carries:
+- `changes` — only the fields that actually changed (`title`, `description`, `assignee`)
+- `title` — current (post-change) title
+- `previousTitle` — title before the change
+
+Consumed by agent-bridge → finds the item in Taiga (by `previousTitle` when the
+task was renamed, otherwise by `title`) and patches that item (`assigned_to` is
+resolved against the project's membership list).
+
 ## meeting.started
 Published when the voice bot joins a Discord channel and starts an ambient session.
 

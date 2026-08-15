@@ -262,6 +262,17 @@ class TestTaigaHTTP:
 # ─────────────────────────────────────────────
 
 class TestConfigLoader:
+    """load_config lives in backend/server/bot/main.py (bot entry point)."""
+
+    @staticmethod
+    def _import_bot_main():
+        import importlib.util, os
+        path = os.path.join(os.path.dirname(__file__), "..", "server", "bot", "main.py")
+        spec = importlib.util.spec_from_file_location("bot_main_module", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
     def test_env_var_resolution(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MY_TOKEN", "resolved!")
         cfg_file = tmp_path / "config.json"
@@ -273,21 +284,159 @@ class TestConfigLoader:
             "advanced": {"max_iterations": 8, "context_cache_ttl": 60, "memory_max_tokens": 2000},
             "channel_mappings": [], "role_permissions": [],
         }))
-        import sys; sys.path.insert(0, str(tmp_path.parent))
-        # Import load_config from main
-        import importlib.util, os
-        spec = importlib.util.spec_from_file_location("main_module",
-            os.path.join(os.path.dirname(__file__), "..", "main.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        cfg = mod.load_config(str(cfg_file))
+        cfg = self._import_bot_main().load_config(str(cfg_file))
         assert cfg["discord"]["bot_token"] == "resolved!"
 
     def test_missing_config_exits(self, tmp_path):
-        import importlib.util, os, sys
-        spec = importlib.util.spec_from_file_location("main_module",
-            os.path.join(os.path.dirname(__file__), "..", "main.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        mod = self._import_bot_main()
         with pytest.raises(SystemExit):
             mod.load_config(str(tmp_path / "nonexistent.json"))
+
+
+# ─────────────────────────────────────────────
+# TaigaSyncHandler tests (voice → Taiga mirror)
+# ─────────────────────────────────────────────
+
+class TestTaigaSyncHandler:
+    """Mirrors voice task events into Taiga via the Python consumer."""
+
+    def setup_method(self):
+        import sys, os
+        from unittest.mock import MagicMock
+        root = os.path.join(os.path.dirname(__file__), "..", "python-consumer")
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from taiga.taiga_sync import TaigaSyncHandler
+        self.TaigaSyncHandler = TaigaSyncHandler
+        self.MagicMock = MagicMock
+
+    def _item(self, **overrides):
+        from core.base import ProjectItem
+        fields = dict(
+            platform="taiga", item_id="100", item_type="tasks",
+            subject="Fix login bug", description="", status="new",
+            assignee=None, tags=[], url=None,
+        )
+        fields.update(overrides)
+        return ProjectItem(**fields)
+
+    def test_created_appends_context_and_passes_assignee(self):
+        pm = self.MagicMock()
+        pm.get_project_id.return_value = "77"
+        pm.create_item.return_value = self._item(subject="New task")
+        handler = self.TaigaSyncHandler(pm, "proj")
+
+        handler.on_task_created({
+            "eventType": "task.created", "taskId": "m1", "title": "New task",
+            "description": "do it", "assignee": "alice",
+            "createdBy": "Alice", "meetingId": "mtg1",
+        })
+
+        kwargs = pm.create_item.call_args.kwargs
+        assert kwargs["assigned_to"] == "alice"
+        assert kwargs["subject"] == "New task"
+        assert "Meeting session: mtg1" in kwargs["description"]
+        assert "from-meeting" in kwargs["tags"]
+
+    def test_updated_applies_assignee_and_description(self):
+        pm = self.MagicMock()
+        pm.get_project_id.return_value = "77"
+        pm.search_items.return_value = [self._item()]
+        pm.list_members.return_value = [
+            {"id": 5, "username": "alice", "full_name": "Alice", "role": "dev"}]
+        pm.update_item.return_value = self._item(assignee="alice")
+        handler = self.TaigaSyncHandler(pm, "proj")
+
+        handler.on_task_updated({
+            "eventType": "task.updated", "taskId": "m1",
+            "title": "Fix login bug",
+            "changes": {"assignee": "alice", "description": "updated description"},
+        })
+
+        assert pm.update_item.call_count == 1
+        _, _, fields = pm.update_item.call_args.args
+        assert fields["assigned_to"] == 5
+        assert fields["description"] == "updated description"
+        assert "subject" not in fields
+
+    def test_updated_rename_searches_by_previous_title(self):
+        pm = self.MagicMock()
+        pm.get_project_id.return_value = "77"
+        pm.search_items.return_value = [self._item()]  # old title still in Taiga
+        pm.update_item.return_value = self._item(subject="New title")
+        handler = self.TaigaSyncHandler(pm, "proj")
+
+        handler.on_task_updated({
+            "eventType": "task.updated", "taskId": "m1",
+            "title": "New title", "previousTitle": "Fix login bug",
+            "changes": {"title": "New title"},
+        })
+
+        _, search = pm.search_items.call_args.args
+        assert search == "Fix login bug"
+        _, _, fields = pm.update_item.call_args.args
+        assert fields["subject"] == "New title"
+
+    def test_updated_missing_match_skips(self):
+        pm = self.MagicMock()
+        pm.get_project_id.return_value = "77"
+        pm.search_items.return_value = []  # no matching Taiga item
+        handler = self.TaigaSyncHandler(pm, "proj")
+
+        handler.on_task_updated({
+            "eventType": "task.updated", "taskId": "m1",
+            "title": "Ghost task", "changes": {"description": "x"},
+        })
+
+        pm.update_item.assert_not_called()
+
+
+# ─────────────────────────────────────────────
+# Meeting memory tests (voice → chat agent context)
+# ─────────────────────────────────────────────
+
+class TestMeetingMemory:
+    """Meeting transcripts shared with the chat agent's memory store."""
+
+    def setup_method(self):
+        import sys, os
+        root = os.path.join(os.path.dirname(__file__), "..", "python-consumer")
+        if root not in sys.path:
+            sys.path.insert(0, root)
+
+    def test_get_meeting_context_returns_summaries_only(self):
+        from agent.agent import ChannelMemoryStore
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        mem = ChannelMemoryStore(max_messages=10)
+        mem.append("ch1", [
+            SystemMessage(content="[MEETING CONTEXT — injected automatically]\nMeeting ID: m1"),
+            HumanMessage(content="hello"),
+        ])
+
+        ctx = mem.get_meeting_context("ch1")
+        assert len(ctx) == 1
+        assert ctx[0].startswith("[MEETING CONTEXT")
+
+        other = mem.get_meeting_context("ch2")
+        assert other == []
+
+    def test_meeting_summary_message_builds(self):
+        from memory.meeting_memory import build_meeting_summary_message
+        from langchain_core.messages import SystemMessage
+
+        msg = build_meeting_summary_message({
+            "meetingId": "m1", "channelId": "vc1", "endedAt": 0,
+            "durationMs": 60_000,
+            "summary": {
+                "participants": [{"name": "Alice"}],
+                "tasksCreated": ["task A"], "tasksClosed": [],
+                "fullTranscript": [{"role": "user", "speakerName": "Bob",
+                                    "text": "we should fix the auth bug", "timestamp": 0}],
+            },
+        })
+
+        assert isinstance(msg, SystemMessage)
+        assert "[MEETING CONTEXT" in msg.content
+        assert "Alice" in msg.content
+        assert "task A" in msg.content

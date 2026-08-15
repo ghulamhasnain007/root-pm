@@ -81,6 +81,7 @@ def build_bridge(memory_store=None):
         })
         taiga_handler = TaigaSyncHandler(pm, project_slug)
         consumer.on("task.created", taiga_handler.on_task_created)
+        consumer.on("task.updated", taiga_handler.on_task_updated)
         consumer.on("task.closed",  taiga_handler.on_task_closed)
         logger.info("Taiga sync registered for project '%s'", project_slug)
     else:
