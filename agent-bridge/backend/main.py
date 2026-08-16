@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.settings import APP_TITLE, APP_VERSION, CORS_ORIGINS
-from routers import config, platforms, channels, status, logs
+from routers import config, platforms, channels, status, logs, memory
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 
@@ -22,6 +22,7 @@ app.include_router(platforms.router, prefix="/api/platforms", tags=["Platforms"]
 app.include_router(channels.router,  prefix="/api/channels",  tags=["Channels"])
 app.include_router(status.router,    prefix="/api/status",    tags=["Status"])
 app.include_router(logs.router,      prefix="/api/logs",      tags=["Logs"])
+app.include_router(memory.router,    prefix="/api/memory",    tags=["Memory"])
 
 
 @app.get("/api/health")

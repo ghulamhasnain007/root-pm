@@ -37,7 +37,7 @@ import platforms.pm.jira_platform                # noqa: F401
 import platforms.pm.linear_platform              # noqa: F401
 
 from core.registry import PlatformRegistry
-from agent.agent import AgentBridge
+from agent.agent import AgentBridge, DualMemoryStore, ChannelMemoryStore
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "data" / "config.json"
@@ -71,6 +71,65 @@ def load_config(path: str) -> dict:
     with open(config_path, encoding="utf-8") as f:
         raw = json.load(f)
     return _resolve_env(raw)
+
+
+def _build_memory_store(cfg: dict):
+    """
+    Build the memory store based on configuration.
+    Returns DualMemoryStore if Redis/MongoDB are available, else ChannelMemoryStore.
+    """
+    redis_url = cfg.get("redis", {}).get("url", "")
+    mongo_uri = cfg.get("mongo", {}).get("uri", "")
+    mongo_db_name = cfg.get("mongo", {}).get("database", "agent_bridge")
+
+    # Allow env var overrides
+    redis_url = os.environ.get("REDIS_URL", redis_url)
+    mongo_uri = os.environ.get("MONGO_URI", mongo_uri)
+    mongo_db_name = os.environ.get("MONGO_DATABASE", mongo_db_name)
+
+    if not redis_url or not mongo_uri:
+        logger.warning(
+            "Redis or MongoDB not configured — using in-memory fallback. "
+            "Set redis.url and mongo.uri in config or REDIS_URL/MONGO_URI env vars."
+        )
+        return ChannelMemoryStore(max_messages=30)
+
+    try:
+        import redis
+        r = redis.Redis.from_url(redis_url, decode_responses=True)
+        r.ping()
+        logger.info("Redis connected: %s", redis_url)
+    except Exception as e:
+        logger.warning("Redis connection failed (%s) — using in-memory fallback", e)
+        return ChannelMemoryStore(max_messages=30)
+
+    try:
+        import pymongo
+        client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        client.admin.command("ping")
+        db = client[mongo_db_name]
+        logger.info("MongoDB connected: %s (database: %s)", mongo_uri, mongo_db_name)
+    except Exception as e:
+        logger.warning("MongoDB connection failed (%s) — using in-memory fallback", e)
+        return ChannelMemoryStore(max_messages=30)
+
+    # Ensure indexes for efficient queries
+    try:
+        db.meetings.create_index("text_channel_id")
+        db.meetings.create_index("ended_at")
+        db.meetings.create_index("consolidated")
+        db.meetings.create_index("meeting_id", unique=True)
+        db.project_context.create_index("_id")
+    except Exception as e:
+        logger.warning("Failed to create MongoDB indexes: %s", e)
+
+    return DualMemoryStore(
+        redis_client=r,
+        mongo_db=db,
+        max_messages=cfg.get("redis", {}).get("max_history_per_channel", 50),
+        history_ttl_seconds=cfg.get("redis", {}).get("history_ttl_days", 7) * 86400,
+        meeting_ttl_seconds=cfg.get("redis", {}).get("meeting_ttl_hours", 24) * 3600,
+    )
 
 
 async def main(config_path: str) -> None:
@@ -139,6 +198,9 @@ async def main(config_path: str) -> None:
         "context_cache_ttl": cfg.get("advanced", {}).get("context_cache_ttl", 60),
     })
 
+    # ── Build memory store (Redis+MongoDB or in-memory fallback) ────────────
+    memory_store = _build_memory_store(cfg)
+
     # ── Instantiate the agent bridge ─────────────────────────────────────────
     adv = cfg.get("advanced", {})
     bridge = AgentBridge(
@@ -149,6 +211,7 @@ async def main(config_path: str) -> None:
         classifier_model   = cfg.get("llm", {}).get("classifier_model", "gemini-2.5-flash"),
         max_iterations     = adv.get("max_iterations", 8),
         memory_max_tokens  = adv.get("memory_max_tokens", 2000),
+        memory_store       = memory_store,
     )
 
     # ── Wire the message callback ────────────────────────────────────────────
@@ -157,7 +220,7 @@ async def main(config_path: str) -> None:
     # ── Kafka bridge (voice bot → Taiga sync + meeting memory) ──────────────
     # Runs the python-consumer in-process so it shares bridge._memory: meeting
     # transcripts injected by MeetingMemoryInjector land in the SAME
-    # ChannelMemoryStore the chat agent reads. Without this the consumer runs
+    # memory store the chat agent reads. Without this the consumer runs
     # standalone with its own memory and the chat agent never sees meetings.
     consumer_root = os.environ.get(
         "AGENT_BRIDGE_CONSUMER_ROOT",
@@ -185,6 +248,9 @@ async def main(config_path: str) -> None:
     else:
         logger.info("KAFKA_BROKERS not set — Kafka bridge disabled")
 
+    # Detect memory store type for logging
+    memory_type = "DualMemoryStore (Redis+MongoDB)" if isinstance(memory_store, DualMemoryStore) else "ChannelMemoryStore (in-memory)"
+
     logger.info("=" * 60)
     logger.info("Agent Bridge starting")
     logger.info("  Communication : %s", comm_id)
@@ -193,6 +259,7 @@ async def main(config_path: str) -> None:
     logger.info("  Classifier    : %s", cfg.get("llm", {}).get("classifier_model"))
     logger.info("  Channel maps  : %d mapping(s)", sum(len(v) for v in channel_map.values()))
     logger.info("  Max iterations: %d", adv.get("max_iterations", 8))
+    logger.info("  Memory store  : %s", memory_type)
     logger.info("=" * 60)
 
     # ── Start the bot (blocks until disconnected) ────────────────────────────

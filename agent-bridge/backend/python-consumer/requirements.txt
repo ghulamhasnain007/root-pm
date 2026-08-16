@@ -1,6 +1,10 @@
 # Kafka
 kafka-python>=2.0.0
 
+# Redis + MongoDB (memory stores)
+redis>=5.0.0
+pymongo>=4.7.0
+
 # Inherited from agent-bridge (must match)
 langchain>=1.0.0
 langchain-core>=0.3.0

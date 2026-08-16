@@ -69,3 +69,7 @@ DEFAULT_CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "gemini-2.5-flash")
 DEFAULT_MAX_ITERATIONS = _get_int("MAX_ITERATIONS", 8)
 DEFAULT_CONTEXT_CACHE_TTL = _get_int("CONTEXT_CACHE_TTL", 60)
 DEFAULT_MEMORY_MAX_TOKENS = _get_int("MEMORY_MAX_TOKENS", 2000)
+
+DEFAULT_REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+DEFAULT_MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+DEFAULT_MONGO_DATABASE = os.getenv("MONGO_DATABASE", "agent_bridge")

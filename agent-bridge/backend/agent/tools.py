@@ -9,15 +9,17 @@ import json
 import logging
 from typing import Any
 from langchain_core.tools import tool
-from core.base import ProjectManagementPlatform
+from core.base import ProjectManagementPlatform, MemoryStore
 
 logger = logging.getLogger("agent_bridge.tools")
 
 
-def build_tools(pm: ProjectManagementPlatform, project_id: str, tier: str) -> list:
+def build_tools(pm: ProjectManagementPlatform, project_id: str, tier: str,
+                memory_store: MemoryStore | None = None) -> list:
     """
     Return the tool list for the given permission tier.
     tier: 'admin' | 'write' | 'read' | 'none'
+    memory_store: optional DualMemoryStore for meeting memory queries
     """
 
     # ── READ TOOLS (available to everyone with tier >= read) ────────────
@@ -135,6 +137,65 @@ def build_tools(pm: ProjectManagementPlatform, project_id: str, tier: str) -> li
             return f"Error fetching project info: {e}"
 
     read_tools = [list_items, get_item, search_items, get_sprint_status, list_members, get_project_info]
+
+    # ── MEMORY TOOLS (available to all tiers if memory_store is available) ────
+
+    if memory_store and hasattr(memory_store, "search_meetings"):
+        @tool
+        def search_meetings(query: str) -> str:
+            """
+            Search past meeting transcripts and summaries for keywords, people, or topics.
+            Returns matching meeting excerpts with dates and participants.
+            Use this when asked about what was discussed, decided, or said in meetings.
+            """
+            try:
+                meetings = memory_store.search_meetings(query)
+                if not meetings:
+                    return f"No meeting records found matching '{query}'."
+                lines = [f"Meeting search results for '{query}' ({len(meetings)} found):"]
+                for m in meetings:
+                    date = m.get("ended_at", "")
+                    participants = m.get("participants", [])
+                    decisions = m.get("decisions", [])
+                    topics = m.get("topics", [])
+                    lines.append(f"\n  Meeting on {date}")
+                    lines.append(f"  Participants: {', '.join(participants)}")
+                    if topics:
+                        lines.append(f"  Topics: {', '.join(topics)}")
+                    if decisions:
+                        lines.append(f"  Decisions: {'; '.join(decisions)}")
+                    # Show matching transcript lines
+                    transcript = m.get("transcript", [])
+                    matching = [t for t in transcript if query.lower() in t.get("text", "").lower()]
+                    if matching:
+                        lines.append("  Matching transcript excerpts:")
+                        for t in matching[:3]:
+                            lines.append(f"    [{t.get('speaker', '?')}]: {t.get('text', '')[:150]}")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"Error searching meetings: {e}"
+
+        @tool
+        def get_project_decisions() -> str:
+            """
+            Get recent decisions made in project meetings.
+            Returns the last 10 decisions with dates and which meeting they were made in.
+            Use this when asked about what was decided or agreed upon.
+            """
+            try:
+                decisions = memory_store.get_project_decisions(project_id)
+                if not decisions:
+                    return "No decisions recorded in meetings yet."
+                lines = ["Recent project decisions:"]
+                for d in decisions:
+                    date = d.get("date", "")
+                    text = d.get("decision", "")
+                    lines.append(f"  • {text} (meeting {d.get('meeting_id', '?')}, {date})")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"Error fetching decisions: {e}"
+
+        read_tools.extend([search_meetings, get_project_decisions])
 
     if tier in ("none", "read"):
         return read_tools

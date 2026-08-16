@@ -116,6 +116,40 @@ services:
     networks:
       - project-net
 
+  # ── Redis (short-term memory) ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: project-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - project-net
+
+  # ── MongoDB (long-term memory) ────────────────────────────────────────────
+  mongo:
+    image: mongo:7
+    container_name: project-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - project-net
+
   # ── Agent Bridge text bot ─────────────────────────────────────────────────
   agent-bot:
     build:
@@ -131,6 +165,10 @@ services:
       - ../agent-bridge/backend/data:/app/backend/data:ro
     depends_on:
       kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
         condition: service_healthy
     networks:
       - project-net
@@ -164,6 +202,8 @@ services:
 
 volumes:
   kafka-data:
+  redis-data:
+  mongo-data:
 
 networks:
   project-net:

@@ -52,15 +52,33 @@ def _parse_channel_map() -> dict[str, str]:
     return result
 
 
+def _build_mongo_client():
+    """Build a pymongo.MongoClient from env vars if configured."""
+    mongo_uri = os.environ.get("MONGO_URI", "")
+    mongo_db_name = os.environ.get("MONGO_DATABASE", "agent_bridge")
+    if not mongo_uri:
+        return None
+    try:
+        import pymongo
+        client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        client.admin.command("ping")
+        db = client[mongo_db_name]
+        logger.info("MongoDB connected for consolidation: %s", mongo_uri)
+        return db
+    except Exception as e:
+        logger.warning("MongoDB not available for consolidation: %s", e)
+        return None
+
+
 def build_bridge(memory_store=None):
     """
-    Build and return (consumer, taiga_handler, memory_injector).
-    Returns (None, None, None) if KAFKA_BROKERS is not set.
+    Build and return (consumer, taiga_handler, memory_injector, consolidation_worker).
+    Returns (None, None, None, None) if KAFKA_BROKERS is not set.
     """
     from bridge_kafka.bridge_consumer import build_consumer_from_env
     consumer = build_consumer_from_env()
     if consumer is None:
-        return None, None, None
+        return None, None, None, None
 
     # ── Taiga sync ────────────────────────────────────────────────────────────
     import platforms.pm.taiga_platform  # noqa — self-registers
@@ -108,7 +126,34 @@ def build_bridge(memory_store=None):
     consumer.on("meeting.ended",      injector.on_meeting_ended)
     logger.info("Meeting memory injector registered (live=%s, map=%s)", inject_live, channel_map)
 
-    return consumer, taiga_handler, injector
+    # ── Consolidation worker ──────────────────────────────────────────────────
+    consolidation_worker = None
+    # Use the memory_store's MongoDB connection if it's a DualMemoryStore
+    mongo_db = None
+    if hasattr(memory_store, "_mongo"):
+        mongo_db = memory_store._mongo
+    else:
+        mongo_db = _build_mongo_client()
+
+    if mongo_db is not None:
+        try:
+            from memory.consolidation import ConsolidationWorker
+            from langchain_google_genai import ChatGoogleGenerativeAI
+
+            gemini_key = os.environ.get("GEMINI_API_KEY", "")
+            agent_model = os.environ.get("AGENT_MODEL", "gemini-2.5-flash")
+            if gemini_key:
+                llm = ChatGoogleGenerativeAI(
+                    model=agent_model, google_api_key=gemini_key, temperature=0,
+                )
+                consolidation_worker = ConsolidationWorker(mongo_db=mongo_db, llm=llm)
+                consolidation_worker.start()
+            else:
+                logger.warning("GEMINI_API_KEY not set — consolidation worker disabled")
+        except Exception as e:
+            logger.warning("Could not start consolidation worker: %s", e)
+
+    return consumer, taiga_handler, injector, consolidation_worker
 
 
 def start_kafka_bridge(memory_store=None):
@@ -116,7 +161,7 @@ def start_kafka_bridge(memory_store=None):
     Called from agent-bridge/main.py to start the Kafka bridge inline.
     Returns the consumer (or None if Kafka not configured).
     """
-    consumer, _, _ = build_bridge(memory_store=memory_store)
+    consumer, _, _, _ = build_bridge(memory_store=memory_store)
     if consumer:
         consumer.start()
         logger.info("Kafka bridge started (background thread)")
@@ -129,7 +174,7 @@ def main():
     logger.info("  AGENT_BRIDGE_ROOT: %s", AGENT_BRIDGE_ROOT)
     logger.info("=" * 60)
 
-    consumer, _, _ = build_bridge()
+    consumer, _, _, consolidation_worker = build_bridge()
     if consumer is None:
         logger.error("Cannot start — set KAFKA_BROKERS.")
         sys.exit(1)
@@ -138,6 +183,8 @@ def main():
 
     def _shutdown(sig, frame):
         logger.info("Shutting down (signal %s)", sig)
+        if consolidation_worker:
+            consolidation_worker.stop()
         consumer.stop()
         sys.exit(0)
 

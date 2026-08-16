@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from langchain_core.messages import BaseMessage
+
 
 @dataclass
 class IncomingMessage:
@@ -139,3 +141,27 @@ class ProjectManagementPlatform(ABC):
     def link_to_epic(self, project_id: str, item_id: str,
                      epic_id: str) -> ProjectItem:
         raise NotImplementedError(f"{self.display_name} does not support epics.")
+
+
+class MemoryStore(ABC):
+    """Abstract interface for conversation and meeting memory."""
+
+    @abstractmethod
+    def get(self, channel_id: str) -> list[BaseMessage]:
+        """Retrieve conversation history for a channel."""
+        ...
+
+    @abstractmethod
+    def append(self, channel_id: str, messages: list[BaseMessage]) -> None:
+        """Append messages to a channel's history."""
+        ...
+
+    @abstractmethod
+    def get_meeting_context(self, channel_id: str) -> list[str]:
+        """Return formatted meeting summaries for the system prompt."""
+        ...
+
+    @abstractmethod
+    def clear(self, channel_id: str) -> None:
+        """Clear all memory for a channel."""
+        ...

@@ -16,7 +16,10 @@ from core.settings import (
     DEFAULT_GEMINI_API_KEY,
     DEFAULT_MAX_ITERATIONS,
     DEFAULT_MEMORY_MAX_TOKENS,
+    DEFAULT_MONGO_DATABASE,
+    DEFAULT_MONGO_URI,
     DEFAULT_PM_PLATFORM,
+    DEFAULT_REDIS_URL,
     DEFAULT_TAIGA_PASSWORD,
     DEFAULT_TAIGA_URL,
     DEFAULT_TAIGA_USERNAME,
@@ -27,6 +30,8 @@ from models.schemas import (
     DiscordConfig,
     LLMConfig,
     LogEntry,
+    MongoConfig,
+    RedisConfig,
     RolePermission,
     TaigaConfig,
 )
@@ -68,6 +73,13 @@ def _build_default_config() -> AppConfig:
             context_cache_ttl=DEFAULT_CONTEXT_CACHE_TTL,
             memory_max_tokens=DEFAULT_MEMORY_MAX_TOKENS,
         ),
+        redis=RedisConfig(
+            url=DEFAULT_REDIS_URL,
+        ),
+        mongo=MongoConfig(
+            uri=DEFAULT_MONGO_URI,
+            database=DEFAULT_MONGO_DATABASE,
+        ),
     )
     cfg.role_permissions = [RolePermission(**r) for r in _DEFAULT_ROLES]
     return cfg
@@ -93,6 +105,10 @@ def _apply_env_defaults(cfg: AppConfig) -> AppConfig:
     cfg.advanced.max_iterations = cfg.advanced.max_iterations or defaults.advanced.max_iterations
     cfg.advanced.context_cache_ttl = cfg.advanced.context_cache_ttl or defaults.advanced.context_cache_ttl
     cfg.advanced.memory_max_tokens = cfg.advanced.memory_max_tokens or defaults.advanced.memory_max_tokens
+
+    cfg.redis.url = cfg.redis.url or defaults.redis.url
+    cfg.mongo.uri = cfg.mongo.uri or defaults.mongo.uri
+    cfg.mongo.database = cfg.mongo.database or defaults.mongo.database
 
     if not cfg.role_permissions:
         cfg.role_permissions = defaults.role_permissions

@@ -41,6 +41,18 @@ class AdvancedConfig(BaseModel):
     memory_max_tokens: int = 2000
 
 
+class RedisConfig(BaseModel):
+    url: str = "redis://localhost:6379/0"
+    max_history_per_channel: int = 50
+    history_ttl_days: int = 7
+    meeting_ttl_hours: int = 24
+
+
+class MongoConfig(BaseModel):
+    uri: str = "mongodb://localhost:27017"
+    database: str = "agent_bridge"
+
+
 # ── Channel map ───────────────────────────────────────────────────────────────
 
 class ChannelMapping(BaseModel):
@@ -70,6 +82,8 @@ class AppConfig(BaseModel):
     taiga: TaigaConfig = Field(default_factory=TaigaConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
+    mongo: MongoConfig = Field(default_factory=MongoConfig)
     channel_mappings: list[ChannelMapping] = Field(default_factory=list)
     role_permissions: list[RolePermission] = Field(default_factory=list)
 

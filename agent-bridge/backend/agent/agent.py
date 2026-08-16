@@ -4,12 +4,17 @@ agent/agent.py
 AgentBridge — full pipeline using LangChain 1.x native tool-calling loop.
 No AgentExecutor — uses the bind_tools + manual ReAct pattern that works
 with LangChain >= 1.0 and Gemini.
+
+Memory architecture:
+  - DualMemoryStore: Redis (short-term conversation history) + MongoDB (long-term meeting data)
+  - ChannelMemoryStore: In-memory fallback for standalone mode (no Redis/MongoDB)
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -21,6 +26,7 @@ from langchain_core.messages import (
 from core.base import (
     IncomingMessage, OutgoingMessage,
     CommunicationPlatform, ProjectManagementPlatform, ProjectContext,
+    MemoryStore,
 )
 from agent.tools import build_tools
 
@@ -95,12 +101,13 @@ class IntentRouter:
                     "confidence": 0.0, "needs_write": True}
 
 
-# ── Per-channel conversation memory ───────────────────────────────────────────
+# ── In-memory fallback (standalone mode, no Redis/MongoDB) ─────────────────────
 
 class ChannelMemoryStore:
     """
     Stores conversation history per Discord channel as a list of BaseMessage.
     Uses a simple ring buffer bounded by max_messages to avoid context overflow.
+    Fallback for standalone mode when Redis/MongoDB are not available.
     """
     def __init__(self, max_messages: int = 20):
         self._store: dict[str, list[BaseMessage]] = {}
@@ -132,6 +139,328 @@ class ChannelMemoryStore:
             for m in buf
             if isinstance(m, SystemMessage) and m.content.startswith("[MEETING CONTEXT")
         ]
+
+
+# ── Dual-layer memory store (Redis short-term + MongoDB long-term) ─────────────
+
+_MESSAGE_TYPE_MAP = {
+    "human": HumanMessage,
+    "ai": AIMessage,
+    "system": SystemMessage,
+    "tool": ToolMessage,
+}
+
+
+def _serialize_message(msg: BaseMessage) -> dict:
+    """Convert a BaseMessage to a JSON-serializable dict."""
+    msg_type = type(msg).__name__.lower().replace("message", "")
+    if msg_type == "base":
+        msg_type = "human"
+    return {
+        "type": msg_type,
+        "content": msg.content,
+        "ts": time.time(),
+    }
+
+
+def _deserialize_message(data: dict) -> BaseMessage:
+    """Convert a dict back to a BaseMessage."""
+    msg_type = data.get("type", "human")
+    cls = _MESSAGE_TYPE_MAP.get(msg_type, HumanMessage)
+    return cls(content=data.get("content", ""))
+
+
+class DualMemoryStore(MemoryStore):
+    """
+    Redis for hot path (conversation history, live transcripts).
+    MongoDB for durable long-term (meeting summaries, extracted entities).
+
+    Keys:
+      channel:{channel_id}:history  — Redis LIST of serialized messages, TTL 7 days
+      meeting:{meeting_id}:transcript — Redis LIST of transcript lines, TTL 24h
+      meeting:{meeting_id}:standup  — Redis HASH of standup data, TTL 24h
+    """
+
+    def __init__(
+        self,
+        redis_client,
+        mongo_db,
+        max_messages: int = 50,
+        history_ttl_seconds: int = 7 * 86400,
+        meeting_ttl_seconds: int = 24 * 3600,
+    ):
+        self._redis = redis_client
+        self._mongo = mongo_db
+        self._max = max_messages
+        self._history_ttl = history_ttl_seconds
+        self._meeting_ttl = meeting_ttl_seconds
+
+    # ── Conversation history (Redis) ──────────────────────────────────────────
+
+    def get(self, channel_id: str) -> list[BaseMessage]:
+        key = f"channel:{channel_id}:history"
+        try:
+            raw_list = self._redis.lrange(key, 0, -1)
+            return [_deserialize_message(json.loads(r)) for r in raw_list]
+        except Exception as e:
+            logger.warning("Redis get failed for channel %s: %s", channel_id, e)
+            return []
+
+    def append(self, channel_id: str, messages: list[BaseMessage]) -> None:
+        key = f"channel:{channel_id}:history"
+        try:
+            pipe = self._redis.pipeline()
+            for msg in messages:
+                pipe.rpush(key, json.dumps(_serialize_message(msg)))
+            pipe.ltrim(key, -self._max, -1)
+            pipe.expire(key, self._history_ttl)
+            pipe.execute()
+        except Exception as e:
+            logger.warning("Redis append failed for channel %s: %s", channel_id, e)
+
+    def clear(self, channel_id: str) -> None:
+        key = f"channel:{channel_id}:history"
+        try:
+            self._redis.delete(key)
+        except Exception as e:
+            logger.warning("Redis clear failed for channel %s: %s", channel_id, e)
+
+    # ── Meeting context (MongoDB long-term) ───────────────────────────────────
+
+    def get_meeting_context(self, channel_id: str) -> list[str]:
+        """
+        Query MongoDB for the last 3 consolidated meetings for this channel.
+        Returns formatted summaries for the system prompt.
+        """
+        try:
+            meetings = list(
+                self._mongo.meetings.find({"text_channel_id": channel_id})
+                .sort("ended_at", -1)
+                .limit(3)
+            )
+        except Exception as e:
+            logger.warning("MongoDB query failed for meeting context: %s", e)
+            return []
+
+        summaries = []
+        for m in meetings:
+            summaries.append(self._format_meeting_summary(m))
+        return summaries
+
+    def _format_meeting_summary(self, meeting: dict) -> str:
+        """Format a MongoDB meeting document into a readable summary."""
+        participants = meeting.get("participants", [])
+        decisions = meeting.get("decisions", [])
+        action_items = meeting.get("action_items", [])
+        blockers = meeting.get("blockers", [])
+        standups = meeting.get("standups", {})
+        ended_at = meeting.get("ended_at", "")
+        duration_min = meeting.get("duration_min", 0)
+        topics = meeting.get("topics", [])
+
+        lines = [f"[MEETING — {ended_at} | {duration_min} min]"]
+        lines.append(f"Participants: {', '.join(participants) or 'unknown'}")
+
+        if topics:
+            lines.append(f"Topics: {', '.join(topics)}")
+
+        if decisions:
+            lines.append("Decisions:")
+            for d in decisions:
+                lines.append(f"  - {d}")
+
+        if action_items:
+            lines.append("Action items:")
+            for ai_item in action_items:
+                owner = ai_item.get("owner", "?")
+                text = ai_item.get("text", "")
+                task_id = ai_item.get("task_id")
+                task_ref = f" (→ {task_id})" if task_id else ""
+                lines.append(f"  - [{owner}] {text}{task_ref}")
+
+        if blockers:
+            lines.append("Blockers:")
+            for b in blockers:
+                owner = b.get("owner", "?")
+                text = b.get("text", "")
+                lines.append(f"  - [{owner}] {text}")
+
+        if standups:
+            lines.append("Standups:")
+            for person, data in standups.items():
+                if isinstance(data, dict):
+                    yesterday = data.get("yesterday", [])
+                    today = data.get("today", [])
+                    person_blockers = data.get("blockers", [])
+                    lines.append(f"  - {person}:")
+                    if yesterday:
+                        lines.append(f"    Yesterday: {'; '.join(yesterday)}")
+                    if today:
+                        lines.append(f"    Today: {'; '.join(today)}")
+                    if person_blockers:
+                        lines.append(f"    Blockers: {'; '.join(person_blockers)}")
+
+        return "\n".join(lines)
+
+    # ── Meeting persistence (write path) ──────────────────────────────────────
+
+    def save_meeting(self, event: dict) -> None:
+        """
+        Persist a meeting.ended event to MongoDB.
+        Called by MeetingMemoryInjector after injecting into channel memory.
+        """
+        meeting_id = event.get("meetingId", "unknown")
+        summary = event.get("summary", {})
+        duration_ms = event.get("durationMs", 0)
+
+        participants = [p.get("name", "?") for p in event.get("participants", [])]
+        full_transcript = summary.get("fullTranscript", [])
+        tasks_created = summary.get("tasksCreated", [])
+        tasks_closed = summary.get("tasksClosed", [])
+
+        # Parse standup data from transcript (if standup format detected)
+        standups = self._parse_standups_from_transcript(full_transcript, participants)
+
+        doc = {
+            "meeting_id": meeting_id,
+            "text_channel_id": event.get("channelId", ""),
+            "started_at": event.get("startedAt", 0),
+            "ended_at": event.get("endedAt", 0),
+            "duration_min": round(duration_ms / 60_000, 1),
+            "participants": participants,
+            "transcript": [
+                {
+                    "speaker": entry.get("speakerName", "Unknown"),
+                    "text": entry.get("text", ""),
+                    "ts": entry.get("timestamp", 0),
+                    "role": entry.get("role", "user"),
+                }
+                for entry in full_transcript
+            ],
+            "standups": standups,
+            "tasks_created": tasks_created,
+            "tasks_closed": tasks_closed,
+            "decisions": [],       # Populated by consolidation worker
+            "action_items": [],    # Populated by consolidation worker
+            "blockers": [],        # Populated by consolidation worker
+            "topics": [],          # Populated by consolidation worker
+            "consolidated": False,
+            "stored_at": datetime.now(timezone.utc),
+        }
+
+        try:
+            self._mongo.meetings.insert_one(doc)
+            logger.info("Meeting %s persisted to MongoDB (%d transcript lines)",
+                        meeting_id, len(full_transcript))
+        except Exception as e:
+            logger.error("Failed to persist meeting %s to MongoDB: %s", meeting_id, e)
+
+        # Also store raw transcript in Redis for quick access (24h TTL)
+        self._store_meeting_transcript_redis(meeting_id, full_transcript)
+
+    def _store_meeting_transcript_redis(self, meeting_id: str, transcript: list) -> None:
+        """Store raw transcript in Redis with 24h TTL for quick recall."""
+        key = f"meeting:{meeting_id}:transcript"
+        try:
+            pipe = self._redis.pipeline()
+            for entry in transcript:
+                pipe.rpush(key, json.dumps({
+                    "speaker": entry.get("speakerName", "Unknown"),
+                    "text": entry.get("text", ""),
+                    "ts": entry.get("timestamp", 0),
+                }))
+            pipe.expire(key, self._meeting_ttl)
+            pipe.execute()
+        except Exception as e:
+            logger.warning("Failed to store transcript in Redis: %s", e)
+
+    def _parse_standups_from_transcript(
+        self, transcript: list, participants: list
+    ) -> dict:
+        """
+        Extract standup data from transcript if it follows the standup format.
+        Returns a dict like {participant_name: {yesterday: [...], today: [...], blockers: [...]}}.
+        """
+        standups = {}
+        for name in participants:
+            standups[name] = {"yesterday": [], "today": [], "blockers": []}
+
+        # Simple heuristic: look for standup keywords in transcript
+        current_speaker = None
+        for entry in transcript:
+            speaker = entry.get("speakerName", "")
+            text = entry.get("text", "").lower().strip()
+            if speaker in standups:
+                current_speaker = speaker
+            if current_speaker and current_speaker in standups:
+                if "yesterday" in text or "what i did" in text:
+                    standups[current_speaker]["yesterday"].append(entry.get("text", ""))
+                elif "today" in text or "what i will" in text or "going to" in text:
+                    standups[current_speaker]["today"].append(entry.get("text", ""))
+                elif "blocker" in text or "blocked" in text or "issue" in text:
+                    standups[current_speaker]["blockers"].append(entry.get("text", ""))
+
+        return standups
+
+    def get_meeting_transcript(self, meeting_id: str) -> list[dict]:
+        """Read raw transcript from Redis for deep recall."""
+        key = f"meeting:{meeting_id}:transcript"
+        try:
+            raw_list = self._redis.lrange(key, 0, -1)
+            return [json.loads(r) for r in raw_list]
+        except Exception as e:
+            logger.warning("Redis get transcript failed for %s: %s", meeting_id, e)
+            return []
+
+    def search_meetings(self, query: str, project_key: str | None = None) -> list[dict]:
+        """
+        Search MongoDB meetings collection for matching transcripts.
+        Returns matching meeting summaries with context.
+        """
+        try:
+            filter_query: dict = {"consolidated": True}
+            if project_key:
+                filter_query["project_key"] = project_key
+
+            # Text search on transcript
+            filter_query["$or"] = [
+                {"transcript.text": {"$regex": query, "$options": "i"}},
+                {"decisions": {"$regex": query, "$options": "i"}},
+                {"topics": {"$regex": query, "$options": "i"}},
+            ]
+
+            meetings = list(
+                self._mongo.meetings.find(filter_query)
+                .sort("ended_at", -1)
+                .limit(5)
+            )
+            return meetings
+        except Exception as e:
+            logger.warning("MongoDB search_meetings failed: %s", e)
+            return []
+
+    def get_project_decisions(self, project_key: str) -> list[dict]:
+        """Get recent decisions from consolidated meetings for a project."""
+        try:
+            meetings = list(
+                self._mongo.meetings.find(
+                    {"project_key": project_key, "consolidated": True, "decisions": {"$ne": []}}
+                )
+                .sort("ended_at", -1)
+                .limit(5)
+            )
+            decisions = []
+            for m in meetings:
+                for d in m.get("decisions", []):
+                    decisions.append({
+                        "decision": d,
+                        "meeting_id": m.get("meeting_id"),
+                        "date": m.get("ended_at"),
+                    })
+            return decisions[:10]
+        except Exception as e:
+            logger.warning("MongoDB get_project_decisions failed: %s", e)
+            return []
 
 
 # ── ReAct tool-calling loop ───────────────────────────────────────────────────
@@ -204,12 +533,13 @@ class AgentBridge:
         classifier_model: str = "gemini-2.5-flash",
         max_iterations: int = 8,
         memory_max_tokens: int = 2000,
+        memory_store: MemoryStore | None = None,
     ):
         self.comm = comm_platform
         self.pm   = pm_platform
 
         self._router  = IntentRouter(gemini_api_key, classifier_model)
-        self._memory  = ChannelMemoryStore(max_messages=30)
+        self._memory  = memory_store or ChannelMemoryStore(max_messages=30)
         self._llm     = ChatGoogleGenerativeAI(
             model=agent_model, google_api_key=gemini_api_key, temperature=0)
         self._max_iter = max_iterations
@@ -272,7 +602,7 @@ class AgentBridge:
             logger.warning("Could not fetch project context: %s", e)
 
         # ── 5. Build tools and LLM ───────────────────────────────────────────
-        tools = build_tools(self.pm, project_id, tier)
+        tools = build_tools(self.pm, project_id, tier, memory_store=self._memory)
         tools_by_name = {t.name: t for t in tools}
         llm_with_tools = self._llm.bind_tools(tools)
 

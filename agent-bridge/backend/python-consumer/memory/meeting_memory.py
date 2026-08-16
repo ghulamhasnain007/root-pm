@@ -2,13 +2,15 @@
 memory/meeting_memory.py
 ────────────────────────
 Injects meeting context from Kafka events into the agent's per-channel
-memory (the ChannelMemoryStore in agent/agent.py).
+memory (the DualMemoryStore in agent/agent.py).
 
 When a meeting ends, a rich summary is built from the full transcript and
-injected as a SystemMessage into the channel's message history. This means
+injected as a SystemMessage into the channel's conversation history. This means
 when a developer types "@bot create a task for the auth bug Alice mentioned"
 — the agent already has the entire meeting transcript in its context window
 and can resolve "Alice" and "the auth bug" without asking.
+
+The DualMemoryStore also persists the meeting to MongoDB for long-term recall.
 """
 from __future__ import annotations
 
@@ -96,7 +98,7 @@ def build_transcript_chunk_message(event: dict) -> HumanMessage | None:
 class MeetingMemoryInjector:
     """
     Receives Kafka events and injects meeting context into the agent's
-    ChannelMemoryStore.
+    memory store (DualMemoryStore or ChannelMemoryStore).
 
     Wire-up in main.py:
         injector = MeetingMemoryInjector(memory_store, channel_map)
@@ -108,7 +110,7 @@ class MeetingMemoryInjector:
     def __init__(self, memory_store, channel_map: dict[str, str],
                  inject_live_transcript: bool = False):
         """
-        memory_store: the ChannelMemoryStore instance from agent/agent.py
+        memory_store: the DualMemoryStore (or ChannelMemoryStore) instance
         channel_map:  {voice_channel_id → discord_text_channel_id}
                       Routes meeting events to the right text channel's memory.
         inject_live_transcript: if True, inject each transcript line in real time.
@@ -158,7 +160,16 @@ class MeetingMemoryInjector:
                 "No text channel mapped for voice channel %s. "
                 "Add it to VOICE_TO_TEXT_CHANNEL_MAP in config.", channel_id)
             return
+
+        # 1. Inject summary into channel conversation history (short-term)
         summary_msg = build_meeting_summary_message(event)
         self._memory.append(target, [summary_msg])
         logger.info("Meeting summary injected into channel %s memory (%d transcript lines)",
                     target, event.get("summary", {}).get("transcriptLineCount", 0))
+
+        # 2. Persist to MongoDB for long-term recall (DualMemoryStore only)
+        if hasattr(self._memory, "save_meeting"):
+            try:
+                self._memory.save_meeting(event)
+            except Exception as e:
+                logger.error("Failed to persist meeting to long-term storage: %s", e)
