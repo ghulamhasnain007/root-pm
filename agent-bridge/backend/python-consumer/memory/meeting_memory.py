@@ -108,20 +108,32 @@ class MeetingMemoryInjector:
     """
 
     def __init__(self, memory_store, channel_map: dict[str, str],
-                 inject_live_transcript: bool = False):
+                 inject_live_transcript: bool = False,
+                 project_key_map: dict[str, str] | None = None):
         """
         memory_store: the DualMemoryStore (or ChannelMemoryStore) instance
         channel_map:  {voice_channel_id → discord_text_channel_id}
                       Routes meeting events to the right text channel's memory.
         inject_live_transcript: if True, inject each transcript line in real time.
+        project_key_map: {discord_text_channel_id → PM project key/slug}
+                      Used to scope persisted meeting memory by project (not
+                      just channel), so channels mapped to the same project
+                      share recall. Falls back to no project scoping (empty
+                      string) if a channel has no mapping — memory still
+                      works, just isn't cross-channel-searchable by project.
         """
         self._memory  = memory_store
         self._map     = channel_map
         self._live    = inject_live_transcript
+        self._project_key_map = project_key_map or {}
 
     def _target_channel(self, voice_channel_id: str) -> str | None:
         """Map a voice channel to the Discord text channel whose memory we update."""
         return self._map.get(str(voice_channel_id))
+
+    def _project_key_for(self, text_channel_id: str) -> str | None:
+        """Resolve the PM project key/slug for a given text channel."""
+        return self._project_key_map.get(str(text_channel_id))
 
     def on_meeting_started(self, event: dict) -> None:
         channel_id = event.get("channelId", "")
@@ -170,6 +182,10 @@ class MeetingMemoryInjector:
         # 2. Persist to MongoDB for long-term recall (DualMemoryStore only)
         if hasattr(self._memory, "save_meeting"):
             try:
-                self._memory.save_meeting(event)
+                self._memory.save_meeting(
+                    event,
+                    project_key=self._project_key_for(target),
+                    channel_id=target,
+                )
             except Exception as e:
                 logger.error("Failed to persist meeting to long-term storage: %s", e)

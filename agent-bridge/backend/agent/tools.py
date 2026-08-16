@@ -15,12 +15,20 @@ logger = logging.getLogger("agent_bridge.tools")
 
 
 def build_tools(pm: ProjectManagementPlatform, project_id: str, tier: str,
-                memory_store: MemoryStore | None = None) -> list:
+                memory_store: MemoryStore | None = None,
+                project_key: str | None = None) -> list:
     """
     Return the tool list for the given permission tier.
     tier: 'admin' | 'write' | 'read' | 'none'
     memory_store: optional DualMemoryStore for meeting memory queries
+    project_key: the PM platform's project *slug* (e.g. Taiga project slug) —
+        NOT the same as project_id (the platform's internal numeric/opaque
+        ID). Meeting memory (save_meeting, consolidation, project_context,
+        project_facts) is keyed by project_key throughout, so memory tools
+        must use project_key, never project_id, when querying the memory
+        store — mixing the two means queries silently match nothing.
     """
+    project_key = project_key or project_id
 
     # ── READ TOOLS (available to everyone with tier >= read) ────────────
 
@@ -144,12 +152,14 @@ def build_tools(pm: ProjectManagementPlatform, project_id: str, tier: str,
         @tool
         def search_meetings(query: str) -> str:
             """
-            Search past meeting transcripts and summaries for keywords, people, or topics.
+            Search past meeting transcripts and summaries for keywords, people, decisions,
+            or topics — including paraphrased matches, not just exact wording (e.g. a query
+            for "auth decision" can match a meeting that said "we agreed to use OAuth").
             Returns matching meeting excerpts with dates and participants.
             Use this when asked about what was discussed, decided, or said in meetings.
             """
             try:
-                meetings = memory_store.search_meetings(query)
+                meetings = memory_store.search_meetings(query, project_key=project_key)
                 if not meetings:
                     return f"No meeting records found matching '{query}'."
                 lines = [f"Meeting search results for '{query}' ({len(meetings)} found):"]
@@ -164,13 +174,19 @@ def build_tools(pm: ProjectManagementPlatform, project_id: str, tier: str,
                         lines.append(f"  Topics: {', '.join(topics)}")
                     if decisions:
                         lines.append(f"  Decisions: {'; '.join(decisions)}")
-                    # Show matching transcript lines
-                    transcript = m.get("transcript", [])
-                    matching = [t for t in transcript if query.lower() in t.get("text", "").lower()]
-                    if matching:
-                        lines.append("  Matching transcript excerpts:")
-                        for t in matching[:3]:
-                            lines.append(f"    [{t.get('speaker', '?')}]: {t.get('text', '')[:150]}")
+                    matched = m.get("matched_chunks")
+                    if matched:
+                        lines.append("  Most relevant excerpts:")
+                        for c in matched:
+                            lines.append(f"    ({c.get('kind', 'excerpt')}, score={c.get('score')}) {c.get('text', '')[:200]}")
+                    else:
+                        # Fall back to a plain keyword scan of the raw transcript
+                        transcript = m.get("transcript", [])
+                        matching = [t for t in transcript if query.lower() in t.get("text", "").lower()]
+                        if matching:
+                            lines.append("  Matching transcript excerpts:")
+                            for t in matching[:3]:
+                                lines.append(f"    [{t.get('speaker', '?')}]: {t.get('text', '')[:150]}")
                 return "\n".join(lines)
             except Exception as e:
                 return f"Error searching meetings: {e}"
@@ -183,7 +199,7 @@ def build_tools(pm: ProjectManagementPlatform, project_id: str, tier: str,
             Use this when asked about what was decided or agreed upon.
             """
             try:
-                decisions = memory_store.get_project_decisions(project_id)
+                decisions = memory_store.get_project_decisions(project_key)
                 if not decisions:
                     return "No decisions recorded in meetings yet."
                 lines = ["Recent project decisions:"]
@@ -195,7 +211,67 @@ def build_tools(pm: ProjectManagementPlatform, project_id: str, tier: str,
             except Exception as e:
                 return f"Error fetching decisions: {e}"
 
-        read_tools.extend([search_meetings, get_project_decisions])
+        @tool
+        def get_action_items(owner: str = "") -> str:
+            """
+            Get currently OPEN action items tracked from past meetings, optionally
+            filtered to a specific person. This reflects the reconciled state — items
+            resolved in a later meeting are automatically dropped, so this always
+            reflects what's still outstanding, not a raw historical log.
+            owner: optional name/username to filter by (leave blank for everyone)
+            """
+            try:
+                items = memory_store.get_action_items(project_key, owner=owner or None)
+                if not items:
+                    scope = f" for {owner}" if owner else ""
+                    return f"No open action items{scope}."
+                lines = [f"Open action items ({len(items)}):"]
+                for i in items:
+                    who = i.get("owner") or "Unassigned"
+                    text = i.get("text", "")
+                    ref = i.get("created_in", "")
+                    lines.append(f"  • [{who}] {text}" + (f" (from meeting {ref})" if ref else ""))
+                return "\n".join(lines)
+            except Exception as e:
+                return f"Error fetching action items: {e}"
+
+        @tool
+        def remember_fact(fact: str) -> str:
+            """
+            Record a durable fact about this project that should be remembered going
+            forward — independent of any single meeting or conversation (e.g. "the
+            staging environment URL is X", "Alice is the on-call lead this sprint").
+            Use this when the user explicitly tells you something to remember.
+            fact: the fact to remember, stated plainly in one sentence
+            """
+            try:
+                memory_store.remember_fact(project_key, fact, source="chat")
+                return f"✅ Noted: {fact}"
+            except Exception as e:
+                return f"❌ Error saving fact: {e}"
+
+        @tool
+        def recall_facts(topic: str = "") -> str:
+            """
+            Recall durable facts previously saved about this project (via remember_fact
+            or extracted from meetings), optionally filtered to a topic.
+            topic: optional keyword/topic to filter by (leave blank for the most recent facts)
+            """
+            try:
+                facts = memory_store.recall_facts(project_key, topic=topic or None)
+                if not facts:
+                    return "No project facts recorded yet."
+                lines = ["Project facts:"]
+                for f in facts:
+                    lines.append(f"  • {f.get('fact', '')} (source: {f.get('source', 'unknown')})")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"Error recalling facts: {e}"
+
+        read_tools.extend([
+            search_meetings, get_project_decisions,
+            get_action_items, remember_fact, recall_facts,
+        ])
 
     if tier in ("none", "read"):
         return read_tools

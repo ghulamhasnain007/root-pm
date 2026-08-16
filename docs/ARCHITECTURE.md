@@ -32,8 +32,49 @@ queries). Without Taiga, it falls back to `KafkaTaskStore` (MongoDB + Kafka → 
 bridge mirrors events to Taiga) or plain `MongoTaskStore`.
 
 The MeetingMemoryInjector runs inside the agent-bridge bot process and shares the
-same `ChannelMemoryStore` the chat agent reads, so meeting transcripts are visible
+same memory store (`DualMemoryStore` when Redis/MongoDB are configured, else
+`ChannelMemoryStore`) the chat agent reads, so meeting transcripts are visible
 to the text agent.
+
+## Memory architecture
+
+Memory is split across two layers plus a background reconciliation process:
+
+- **Redis (working memory)** — per-channel conversation history (ring buffer,
+  TTL'd), keyed by `channel:{channel_id}:history`.
+- **MongoDB (durable memory)** — four collections:
+  - `meetings` — one document per meeting: raw transcript, participants, and
+    (once processed) extracted `decisions`/`action_items`/`blockers`/`topics`.
+    Keyed by `text_channel_id` *and* `project_key` (a channel maps to exactly
+    one project; a project can span multiple channels).
+  - `project_context` — one document per `project_key` (`_id`), holding the
+    **reconciled** current state: `open_action_items`, `open_blockers`,
+    `recent_decisions`. This is updated, not just appended to — the
+    consolidation worker retires items a later meeting indicates are resolved.
+  - `project_facts` — durable, project-scoped facts independent of any single
+    meeting (asserted via chat with `remember_fact` or extracted during
+    consolidation). Contradicted facts are marked `superseded` rather than
+    deleted, preserving history.
+  - `meeting_chunks` — embedded chunks (raw transcript segments plus
+    individually-embedded decisions/action items/blockers/topics) used for
+    semantic search. Populated only when `GEMINI_API_KEY` is set; absent it,
+    search falls back to MongoDB regex matching only.
+
+**Consolidation** (`python-consumer/memory/consolidation.py`) runs as a
+background thread, polling every 5 minutes for meetings older than 10 minutes
+with `consolidated: false`. It claims meetings atomically
+(`find_one_and_update`, safe for multiple consumer replicas), calls the LLM to
+extract structured entities, and reconciles them into `project_context` and
+`project_facts` — passing the currently-open items into the extraction prompt
+so the LLM can report what got resolved, not just what's new.
+
+**Retrieval** (`agent/context.py`, `agent/agent.py`) is token-budgeted and
+query-aware: `ContextAssembler` fits meeting summaries and conversation
+history into `memory_max_tokens`, and meeting summaries are chosen by
+semantic relevance to the current message (via `meeting_chunks`) when
+embeddings are configured, falling back to recency otherwise.
+`search_meetings` combines keyword/regex matching with semantic search and
+merges results by meeting.
 
 ## Topics
 

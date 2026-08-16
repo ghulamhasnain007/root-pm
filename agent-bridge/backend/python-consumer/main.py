@@ -106,6 +106,20 @@ def build_bridge(memory_store=None):
         logger.warning("Taiga config incomplete — task sync disabled. "
                        "Set TAIGA_URL, TAIGA_USER, TAIGA_PASS, TAIGA_PROJECT_SLUG.")
 
+    # ── Shared embedding provider (optional semantic memory search) ────────────
+    # Built once and threaded through both the live injector (so a fresh
+    # meeting's transcript is searchable right away) and the consolidation
+    # worker (so decisions/action items get embedded too). Degrades silently
+    # to keyword/regex-only search if GEMINI_API_KEY is unset.
+    embeddings = None
+    try:
+        from core.embeddings import EmbeddingProvider
+        gemini_key_for_embeddings = os.environ.get("GEMINI_API_KEY", "")
+        embedding_model = os.environ.get("EMBEDDING_MODEL", "models/text-embedding-004")
+        embeddings = EmbeddingProvider(api_key=gemini_key_for_embeddings, model=embedding_model)
+    except Exception as e:
+        logger.info("Semantic memory search unavailable: %s", e)
+
     # ── Meeting memory injection ───────────────────────────────────────────────
     channel_map  = _parse_channel_map()
     inject_live  = os.environ.get("INJECT_LIVE_TRANSCRIPT", "false").lower() == "true"
@@ -114,12 +128,20 @@ def build_bridge(memory_store=None):
         from agent.agent import ChannelMemoryStore
         memory_store = ChannelMemoryStore(max_messages=50)
         logger.info("Standalone mode — memory store is local to this process.")
+    elif hasattr(memory_store, "_embeddings") and getattr(memory_store, "_embeddings", None) is None:
+        # DualMemoryStore built elsewhere (e.g. agent-bridge/main.py) without
+        # an embedding provider — attach the one we just built so semantic
+        # search/remember_fact/recall_facts work end to end.
+        memory_store._embeddings = embeddings
+
+    project_key_map = _parse_channel_to_project_map()
 
     from memory.meeting_memory import MeetingMemoryInjector
     injector = MeetingMemoryInjector(
         memory_store=memory_store,
         channel_map=channel_map,
         inject_live_transcript=inject_live,
+        project_key_map=project_key_map,
     )
     consumer.on("meeting.started",    injector.on_meeting_started)
     consumer.on("meeting.transcript", injector.on_transcript)
@@ -136,6 +158,7 @@ def build_bridge(memory_store=None):
         mongo_db = _build_mongo_client()
 
     if mongo_db is not None:
+        _ensure_memory_indexes(mongo_db)
         try:
             from memory.consolidation import ConsolidationWorker
             from langchain_google_genai import ChatGoogleGenerativeAI
@@ -146,7 +169,9 @@ def build_bridge(memory_store=None):
                 llm = ChatGoogleGenerativeAI(
                     model=agent_model, google_api_key=gemini_key, temperature=0,
                 )
-                consolidation_worker = ConsolidationWorker(mongo_db=mongo_db, llm=llm)
+                consolidation_worker = ConsolidationWorker(
+                    mongo_db=mongo_db, llm=llm, embeddings=embeddings,
+                )
                 consolidation_worker.start()
             else:
                 logger.warning("GEMINI_API_KEY not set — consolidation worker disabled")
@@ -154,6 +179,65 @@ def build_bridge(memory_store=None):
             logger.warning("Could not start consolidation worker: %s", e)
 
     return consumer, taiga_handler, injector, consolidation_worker
+
+
+def _parse_channel_to_project_map() -> dict[str, str]:
+    """
+    Maps Discord text channel ID -> PM project key/slug, read from the same
+    config the FastAPI dashboard writes (data/config.json's channel_mappings),
+    so meetings get scoped by project_key rather than just channel_id — a
+    decision made in #eng and #standup (both mapped to the same project)
+    should be recallable from either channel.
+
+    Falls back to TAIGA_PROJECT_SLUG env var for all channels when the app
+    config isn't reachable (e.g. standalone consumer with no dashboard).
+    """
+    result: dict[str, str] = {}
+    try:
+        from core.store import get_config
+        cfg = get_config()
+        for mapping in getattr(cfg, "channel_mappings", []):
+            if mapping.channel_id and mapping.project_slug:
+                result[mapping.channel_id] = mapping.project_slug
+    except Exception as e:
+        logger.info("Could not load channel->project map from app config: %s", e)
+
+    if not result:
+        fallback_slug = os.environ.get("TAIGA_PROJECT_SLUG", "")
+        if fallback_slug:
+            logger.info("Using TAIGA_PROJECT_SLUG as the project key for all channels "
+                        "(no channel_mappings configured).")
+        result = _FallbackProjectMap(fallback_slug)  # type: ignore[assignment]
+    return result
+
+
+class _FallbackProjectMap(dict):
+    """A dict subclass that returns the same fallback project_key for any
+    channel_id key, instead of KeyError/None — used when no per-channel
+    config exists yet but a single default project is configured via env."""
+
+    def __init__(self, fallback: str):
+        super().__init__()
+        self._fallback = fallback
+
+    def get(self, key, default=None):
+        return self._fallback or default
+
+
+def _ensure_memory_indexes(mongo_db) -> None:
+    """Create indexes needed for memory queries to stay fast as data grows.
+    Safe to call on every startup — create_index is idempotent."""
+    try:
+        mongo_db.meetings.create_index("text_channel_id")
+        mongo_db.meetings.create_index("project_key")
+        mongo_db.meetings.create_index([("consolidated", 1), ("consolidating", 1), ("ended_at", 1)])
+        mongo_db.meeting_chunks.create_index("meeting_id")
+        mongo_db.meeting_chunks.create_index("channel_id")
+        mongo_db.meeting_chunks.create_index([("project_key", 1), ("ended_at", -1)])
+        mongo_db.project_facts.create_index([("project_key", 1), ("superseded", 1)])
+        logger.info("Memory collection indexes ensured.")
+    except Exception as e:
+        logger.warning("Failed to ensure memory indexes: %s", e)
 
 
 def start_kafka_bridge(memory_store=None):

@@ -20,3 +20,6 @@ pymongo>=4.7.0
 
 # ── Testing ───────────────────────────────────────────────────────
 pytest>=8.0.0
+
+# ── Token counting for memory/context budgeting ──────────────────
+tiktoken>=0.7.0

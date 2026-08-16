@@ -39,4 +39,14 @@ Optional live injection into agent memory (INJECT_LIVE_TRANSCRIPT=true).
 ## meeting.ended
 Published when the ambient session ends.
 Contains the complete transcript and a list of tasks created/closed.
-Injected into the agent's per-channel memory as a SystemMessage.
+Injected into the agent's per-channel memory as a SystemMessage, and
+persisted to MongoDB by `DualMemoryStore.save_meeting`.
+
+**Note on `channelId`:** this field is the *voice* channel the meeting took
+place in, not the Discord text channel the chat agent reads from. Consumers
+must resolve it to a text channel via `VOICE_TO_TEXT_CHANNEL_MAP` before using
+it as a memory key — `MeetingMemoryInjector` does this resolution and passes
+the resolved text channel id (plus the project key resolved from
+`channel_mappings`) explicitly into `save_meeting`, rather than the raw event
+field. An earlier version stored the raw voice channel id directly, which
+silently broke every subsequent meeting-context lookup for that channel.

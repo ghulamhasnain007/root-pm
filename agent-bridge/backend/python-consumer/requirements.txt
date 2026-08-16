@@ -13,3 +13,6 @@ langchain-community>=0.3.0
 requests>=2.32.0
 python-dotenv>=1.0.0
 pydantic>=2.7.0
+
+# ── Token counting for memory/context budgeting ──────────────────
+tiktoken>=0.7.0

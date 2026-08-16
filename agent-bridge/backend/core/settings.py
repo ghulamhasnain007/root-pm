@@ -73,3 +73,14 @@ DEFAULT_MEMORY_MAX_TOKENS = _get_int("MEMORY_MAX_TOKENS", 2000)
 DEFAULT_REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DEFAULT_MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DEFAULT_MONGO_DATABASE = os.getenv("MONGO_DATABASE", "agent_bridge")
+
+# ── Memory retrieval/embeddings ─────────────────────────────────────────────
+DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/text-embedding-004")
+DEFAULT_EMBEDDING_DIMENSIONS = _get_int("EMBEDDING_DIMENSIONS", 768)
+DEFAULT_MEMORY_CHUNK_TOKENS = _get_int("MEMORY_CHUNK_TOKENS", 400)
+DEFAULT_MEMORY_CHUNK_OVERLAP = _get_int("MEMORY_CHUNK_OVERLAP", 60)
+DEFAULT_MEMORY_TOP_K = _get_int("MEMORY_TOP_K", 5)
+
+# Optional API key required on /api/memory/* (sensitive: transcripts, facts).
+# Leave unset to keep the previous (dev-only) unauthenticated behavior.
+DEFAULT_MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "")

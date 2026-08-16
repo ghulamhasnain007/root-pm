@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -28,6 +29,8 @@ from core.base import (
     CommunicationPlatform, ProjectManagementPlatform, ProjectContext,
     MemoryStore,
 )
+from core.embeddings import EmbeddingProvider, chunk_text, rank_by_similarity
+from agent.context import ContextAssembler
 from agent.tools import build_tools
 
 logger = logging.getLogger("agent_bridge.agent")
@@ -103,11 +106,16 @@ class IntentRouter:
 
 # ── In-memory fallback (standalone mode, no Redis/MongoDB) ─────────────────────
 
-class ChannelMemoryStore:
+class ChannelMemoryStore(MemoryStore):
     """
     Stores conversation history per Discord channel as a list of BaseMessage.
     Uses a simple ring buffer bounded by max_messages to avoid context overflow.
     Fallback for standalone mode when Redis/MongoDB are not available.
+
+    Inherits MemoryStore's no-op defaults for get_action_items/remember_fact/
+    recall_facts/get_relevant_meeting_context — this store has no durable
+    project-scoped memory, only per-channel conversation + injected meeting
+    summaries, so those simply degrade gracefully instead of erroring.
     """
     def __init__(self, max_messages: int = 20):
         self._store: dict[str, list[BaseMessage]] = {}
@@ -188,12 +196,20 @@ class DualMemoryStore(MemoryStore):
         max_messages: int = 50,
         history_ttl_seconds: int = 7 * 86400,
         meeting_ttl_seconds: int = 24 * 3600,
+        embeddings: EmbeddingProvider | None = None,
+        chunk_tokens: int = 400,
+        chunk_overlap_tokens: int = 60,
     ):
         self._redis = redis_client
         self._mongo = mongo_db
         self._max = max_messages
         self._history_ttl = history_ttl_seconds
         self._meeting_ttl = meeting_ttl_seconds
+        # Optional — when unset, semantic search/embedding features silently
+        # degrade to keyword/regex search and recency-based ranking.
+        self._embeddings = embeddings
+        self._chunk_tokens = chunk_tokens
+        self._chunk_overlap_tokens = chunk_overlap_tokens
 
     # ── Conversation history (Redis) ──────────────────────────────────────────
 
@@ -229,8 +245,9 @@ class DualMemoryStore(MemoryStore):
 
     def get_meeting_context(self, channel_id: str) -> list[str]:
         """
-        Query MongoDB for the last 3 consolidated meetings for this channel.
-        Returns formatted summaries for the system prompt.
+        Query MongoDB for the most recent meetings for this channel, newest
+        first. Recency-only fallback — used when no query is available (e.g.
+        no current user message yet) or ranking isn't needed.
         """
         try:
             meetings = list(
@@ -246,6 +263,69 @@ class DualMemoryStore(MemoryStore):
         for m in meetings:
             summaries.append(self._format_meeting_summary(m))
         return summaries
+
+    def get_relevant_meeting_context(
+        self, channel_id: str, query: str, project_key: str | None = None, top_k: int = 3
+    ) -> list[str]:
+        """
+        Query-aware meeting context: rank meetings for this channel by
+        semantic similarity to `query` when embeddings are available, else
+        fall back to recency. This is what fixes the old behavior of always
+        injecting "the last 3 meetings" regardless of what the user actually
+        asked about.
+        """
+        if not query or not query.strip() or not (self._embeddings and self._embeddings.available):
+            return self.get_meeting_context(channel_id)[-top_k:]
+
+        query_vector = self._embeddings.embed_query(query)
+        if not query_vector:
+            return self.get_meeting_context(channel_id)[-top_k:]
+
+        try:
+            candidates = list(
+                self._mongo.meeting_chunks.find(
+                    {"channel_id": channel_id, "kind": {"$in": ["decision", "action_item", "blocker", "topic"]}}
+                )
+                .sort("ended_at", -1)
+                .limit(300)
+            )
+        except Exception as e:
+            logger.warning("MongoDB meeting_chunks query failed: %s", e)
+            return self.get_meeting_context(channel_id)[-top_k:]
+
+        if not candidates:
+            return self.get_meeting_context(channel_id)[-top_k:]
+
+        ranked = rank_by_similarity(query_vector, candidates, top_k=top_k * 3)
+        # Pull the *full* meeting summary for each distinct meeting_id the
+        # ranked chunks point to, best-scoring meeting first, deduplicated.
+        seen_meetings: set[str] = set()
+        ordered_meeting_ids: list[str] = []
+        for chunk in ranked:
+            mid = chunk.get("meeting_id")
+            if mid and mid not in seen_meetings:
+                seen_meetings.add(mid)
+                ordered_meeting_ids.append(mid)
+            if len(ordered_meeting_ids) >= top_k:
+                break
+
+        if not ordered_meeting_ids:
+            return self.get_meeting_context(channel_id)[-top_k:]
+
+        try:
+            docs = {
+                d["meeting_id"]: d
+                for d in self._mongo.meetings.find({"meeting_id": {"$in": ordered_meeting_ids}})
+            }
+        except Exception as e:
+            logger.warning("MongoDB meetings lookup failed: %s", e)
+            return self.get_meeting_context(channel_id)[-top_k:]
+
+        return [
+            self._format_meeting_summary(docs[mid])
+            for mid in ordered_meeting_ids
+            if mid in docs
+        ]
 
     def _format_meeting_summary(self, meeting: dict) -> str:
         """Format a MongoDB meeting document into a readable summary."""
@@ -304,14 +384,29 @@ class DualMemoryStore(MemoryStore):
 
     # ── Meeting persistence (write path) ──────────────────────────────────────
 
-    def save_meeting(self, event: dict) -> None:
+    def save_meeting(self, event: dict, project_key: str | None = None, channel_id: str | None = None) -> None:
         """
         Persist a meeting.ended event to MongoDB.
         Called by MeetingMemoryInjector after injecting into channel memory.
+
+        project_key: the Taiga/PM project this channel is mapped to (resolved
+        by the caller from channel_mappings config). Memory is scoped by
+        project — not just channel — so a decision made in one channel is
+        recallable from any other channel mapped to the same project.
+
+        channel_id: the *Discord text channel* this meeting's memory should
+        be attached to. IMPORTANT: `event["channelId"]` is the *voice*
+        channel the meeting happened in, not the text channel the bot reads
+        from — passing it straight through here (as earlier code did) silently
+        breaks every text_channel_id lookup (get_meeting_context, search
+        filters) because they're keyed by the real text channel. Callers
+        (MeetingMemoryInjector) resolve the voice→text mapping and must pass
+        the resolved text channel id explicitly.
         """
         meeting_id = event.get("meetingId", "unknown")
         summary = event.get("summary", {})
         duration_ms = event.get("durationMs", 0)
+        resolved_channel_id = channel_id or event.get("channelId", "")
 
         participants = [p.get("name", "?") for p in event.get("participants", [])]
         full_transcript = summary.get("fullTranscript", [])
@@ -323,7 +418,8 @@ class DualMemoryStore(MemoryStore):
 
         doc = {
             "meeting_id": meeting_id,
-            "text_channel_id": event.get("channelId", ""),
+            "text_channel_id": resolved_channel_id,
+            "project_key": project_key or "",
             "started_at": event.get("startedAt", 0),
             "ended_at": event.get("endedAt", 0),
             "duration_min": round(duration_ms / 60_000, 1),
@@ -357,6 +453,61 @@ class DualMemoryStore(MemoryStore):
 
         # Also store raw transcript in Redis for quick access (24h TTL)
         self._store_meeting_transcript_redis(meeting_id, full_transcript)
+
+        # Embed and index the raw transcript for semantic search right away —
+        # don't wait for the (delayed) consolidation pass, so "what did we
+        # just talk about" works immediately after a meeting ends. The
+        # consolidation worker later adds higher-signal chunks (decisions,
+        # action items, blockers) on top of these.
+        self._embed_transcript_chunks(meeting_id, resolved_channel_id, project_key, doc["ended_at"], full_transcript)
+
+    def _embed_transcript_chunks(
+        self,
+        meeting_id: str,
+        channel_id: str,
+        project_key: str | None,
+        ended_at: int,
+        transcript: list[dict],
+    ) -> None:
+        """Chunk the raw transcript and store embeddings in `meeting_chunks`
+        for semantic search. No-op if no embedding provider is configured —
+        keeps this purely additive on top of keyword/regex search."""
+        if not (self._embeddings and self._embeddings.available) or not transcript:
+            return
+
+        full_text = "\n".join(
+            f"[{entry.get('speakerName', 'Unknown')}]: {entry.get('text', '')}"
+            for entry in transcript
+            if entry.get("text", "").strip()
+        )
+        chunks = chunk_text(full_text, self._chunk_tokens, self._chunk_overlap_tokens)
+        if not chunks:
+            return
+
+        vectors = self._embeddings.embed_documents(chunks)
+        if not vectors or len(vectors) != len(chunks):
+            logger.warning("Embedding generation returned mismatched results for meeting %s", meeting_id)
+            return
+
+        try:
+            docs = [
+                {
+                    "meeting_id": meeting_id,
+                    "channel_id": channel_id,
+                    "project_key": project_key or "",
+                    "kind": "transcript_chunk",
+                    "chunk_index": i,
+                    "text": chunk,
+                    "embedding": vector,
+                    "ended_at": ended_at,
+                    "created_at": datetime.now(timezone.utc),
+                }
+                for i, (chunk, vector) in enumerate(zip(chunks, vectors))
+            ]
+            self._mongo.meeting_chunks.insert_many(docs)
+            logger.info("Indexed %d transcript chunk(s) for meeting %s", len(docs), meeting_id)
+        except Exception as e:
+            logger.warning("Failed to index transcript chunks for meeting %s: %s", meeting_id, e)
 
     def _store_meeting_transcript_redis(self, meeting_id: str, transcript: list) -> None:
         """Store raw transcript in Redis with 24h TTL for quick recall."""
@@ -414,30 +565,88 @@ class DualMemoryStore(MemoryStore):
 
     def search_meetings(self, query: str, project_key: str | None = None) -> list[dict]:
         """
-        Search MongoDB meetings collection for matching transcripts.
-        Returns matching meeting summaries with context.
+        Hybrid search over meeting memory: exact/keyword matching (regex,
+        safely escaped) merged with semantic similarity search over embedded
+        transcript/decision/action-item chunks (when embeddings are
+        configured). Keyword search alone misses paraphrases ("we agreed to
+        use OAuth" won't match a query for "auth decision"); semantic search
+        alone misses exact identifiers (ticket IDs, names). Combining both
+        and deduplicating by meeting gives better recall than either alone.
+        Returns matching meeting summaries, each optionally annotated with
+        `matched_chunks` (best semantic excerpts) when semantic search ran.
         """
+        query = (query or "").strip()
+        if not query:
+            return []
+        # Cap length and escape before it ever reaches $regex — untrusted
+        # input (ultimately from chat) must never be interpolated raw into a
+        # regex (ReDoS / unexpectedly expensive scans).
+        safe_query = re.escape(query[:200])
+
+        keyword_meetings: dict[str, dict] = {}
         try:
             filter_query: dict = {"consolidated": True}
             if project_key:
                 filter_query["project_key"] = project_key
-
-            # Text search on transcript
             filter_query["$or"] = [
-                {"transcript.text": {"$regex": query, "$options": "i"}},
-                {"decisions": {"$regex": query, "$options": "i"}},
-                {"topics": {"$regex": query, "$options": "i"}},
+                {"transcript.text": {"$regex": safe_query, "$options": "i"}},
+                {"decisions": {"$regex": safe_query, "$options": "i"}},
+                {"topics": {"$regex": safe_query, "$options": "i"}},
             ]
-
-            meetings = list(
-                self._mongo.meetings.find(filter_query)
-                .sort("ended_at", -1)
-                .limit(5)
-            )
-            return meetings
+            for m in self._mongo.meetings.find(filter_query).sort("ended_at", -1).limit(5):
+                keyword_meetings[m.get("meeting_id", str(m.get("_id")))] = m
         except Exception as e:
-            logger.warning("MongoDB search_meetings failed: %s", e)
-            return []
+            logger.warning("MongoDB keyword search_meetings failed: %s", e)
+
+        semantic_hits: list[dict] = []
+        if self._embeddings and self._embeddings.available:
+            query_vector = self._embeddings.embed_query(query)
+            if query_vector:
+                try:
+                    chunk_filter: dict = {}
+                    if project_key:
+                        chunk_filter["project_key"] = project_key
+                    candidates = list(
+                        self._mongo.meeting_chunks.find(chunk_filter)
+                        .sort("ended_at", -1)
+                        .limit(500)
+                    )
+                    semantic_hits = rank_by_similarity(query_vector, candidates, top_k=8)
+                except Exception as e:
+                    logger.warning("MongoDB semantic search_meetings failed: %s", e)
+
+        # Merge: hydrate any meetings the semantic pass found that keyword
+        # search missed, and attach matched excerpts to meetings found by
+        # either path.
+        chunks_by_meeting: dict[str, list[dict]] = {}
+        missing_meeting_ids = set()
+        for chunk in semantic_hits:
+            mid = chunk.get("meeting_id")
+            if not mid:
+                continue
+            chunks_by_meeting.setdefault(mid, []).append(chunk)
+            if mid not in keyword_meetings:
+                missing_meeting_ids.add(mid)
+
+        if missing_meeting_ids:
+            try:
+                for m in self._mongo.meetings.find({"meeting_id": {"$in": list(missing_meeting_ids)}}):
+                    keyword_meetings[m.get("meeting_id", str(m.get("_id")))] = m
+            except Exception as e:
+                logger.warning("MongoDB hydrate semantic hits failed: %s", e)
+
+        results = []
+        for mid, meeting in keyword_meetings.items():
+            meeting = dict(meeting)
+            if mid in chunks_by_meeting:
+                meeting["matched_chunks"] = [
+                    {"kind": c.get("kind"), "text": c.get("text"), "score": round(c.get("_score", 0), 3)}
+                    for c in sorted(chunks_by_meeting[mid], key=lambda c: c.get("_score", 0), reverse=True)[:3]
+                ]
+            results.append(meeting)
+
+        results.sort(key=lambda m: m.get("ended_at", 0), reverse=True)
+        return results[:5]
 
     def get_project_decisions(self, project_key: str) -> list[dict]:
         """Get recent decisions from consolidated meetings for a project."""
@@ -460,6 +669,88 @@ class DualMemoryStore(MemoryStore):
             return decisions[:10]
         except Exception as e:
             logger.warning("MongoDB get_project_decisions failed: %s", e)
+            return []
+
+    # ── Reconciled project state (open action items / durable facts) ───────────
+    # Backed by `project_context` (maintained by ConsolidationWorker, which
+    # reconciles — not just appends — as items get resolved) and
+    # `project_facts` (durable, project-scoped facts independent of any one
+    # meeting or conversation).
+
+    def get_action_items(
+        self, project_key: str, owner: str | None = None, status: str = "open"
+    ) -> list[dict[str, Any]]:
+        """Return tracked action items for a project. `status='open'` reads
+        the reconciled open_action_items list (items the consolidation
+        worker hasn't seen marked resolved in a later meeting); any other
+        status value returns everything MongoDB has, unfiltered by status,
+        since there's currently no separate closed-items archive."""
+        try:
+            ctx = self._mongo.project_context.find_one({"_id": project_key})
+        except Exception as e:
+            logger.warning("MongoDB get_action_items failed: %s", e)
+            return []
+        if not ctx:
+            return []
+        items = ctx.get("open_action_items", [])
+        if owner:
+            owner_lower = owner.strip().lower()
+            items = [
+                i for i in items
+                if owner_lower in (i.get("owner") or "").lower()
+            ]
+        return items
+
+    def remember_fact(self, project_key: str, fact: str, source: str = "chat") -> None:
+        """Persist a durable, project-scoped fact outside any single
+        conversation or meeting (e.g. something a user tells the bot in
+        chat that should be recalled later, not just this session)."""
+        fact = (fact or "").strip()
+        if not fact or not project_key:
+            return
+        doc: dict[str, Any] = {
+            "project_key": project_key,
+            "fact": fact,
+            "source": source,
+            "created_at": datetime.now(timezone.utc),
+            "superseded": False,
+        }
+        if self._embeddings and self._embeddings.available:
+            vector = self._embeddings.embed_query(fact)
+            if vector:
+                doc["embedding"] = vector
+        try:
+            self._mongo.project_facts.insert_one(doc)
+        except Exception as e:
+            logger.warning("MongoDB remember_fact failed: %s", e)
+
+    def recall_facts(
+        self, project_key: str, topic: str | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Retrieve durable project facts, ranked by relevance to `topic`
+        when embeddings are available, else most recent first. Superseded
+        facts (explicitly contradicted by a later meeting/consolidation) are
+        excluded so stale info doesn't resurface."""
+        try:
+            base_filter = {"project_key": project_key, "superseded": {"$ne": True}}
+            if topic and self._embeddings and self._embeddings.available:
+                query_vector = self._embeddings.embed_query(topic)
+                if query_vector:
+                    candidates = list(
+                        self._mongo.project_facts.find(base_filter).limit(300)
+                    )
+                    return rank_by_similarity(query_vector, candidates, top_k=limit)
+
+            filter_query = dict(base_filter)
+            if topic:
+                filter_query["fact"] = {"$regex": re.escape(topic[:200]), "$options": "i"}
+            return list(
+                self._mongo.project_facts.find(filter_query)
+                .sort("created_at", -1)
+                .limit(limit)
+            )
+        except Exception as e:
+            logger.warning("MongoDB recall_facts failed: %s", e)
             return []
 
 
@@ -543,6 +834,7 @@ class AgentBridge:
         self._llm     = ChatGoogleGenerativeAI(
             model=agent_model, google_api_key=gemini_api_key, temperature=0)
         self._max_iter = max_iterations
+        self._context  = ContextAssembler(total_budget_tokens=memory_max_tokens)
 
         self._project_id_cache: dict[str, str] = {}
 
@@ -602,7 +894,8 @@ class AgentBridge:
             logger.warning("Could not fetch project context: %s", e)
 
         # ── 5. Build tools and LLM ───────────────────────────────────────────
-        tools = build_tools(self.pm, project_id, tier, memory_store=self._memory)
+        tools = build_tools(self.pm, project_id, tier,
+                             memory_store=self._memory, project_key=project_key)
         tools_by_name = {t.name: t for t in tools}
         llm_with_tools = self._llm.bind_tools(tools)
 
@@ -611,9 +904,39 @@ class AgentBridge:
             for m in (ctx.members if ctx else [])
         ) or "No member data available"
 
-        meetings_text = "\n\n".join(
-            self._memory.get_meeting_context(incoming.channel_id)[-3:]
-        ) or "No meeting context recorded yet for this channel."
+        # Query-aware: rank meeting summaries by relevance to what the user
+        # actually asked, instead of always injecting the last 3 regardless
+        # of topic. Falls back to recency automatically when embeddings
+        # aren't configured or nothing scores well.
+        candidate_meetings = self._memory.get_relevant_meeting_context(
+            incoming.channel_id, incoming.content, project_key=project_key, top_k=3
+        )
+
+        # ── 6. Retrieve channel memory ───────────────────────────────────────
+        history = self._memory.get(incoming.channel_id)
+        # Meeting transcripts are surfaced through the system prompt section
+        # above — drop the full SystemMessage copies from history so the same
+        # transcript isn't fed through twice.
+        history = [
+            m for m in history
+            if not (isinstance(m, SystemMessage)
+                    and m.content.startswith("[MEETING CONTEXT"))
+        ]
+
+        # Fit meeting context + history into the configured token budget
+        # (memory_max_tokens) instead of trusting message-count truncation
+        # alone to keep the prompt under the model's context window.
+        assembled = self._context.assemble(candidate_meetings, history)
+        if assembled.meetings_dropped or assembled.history_dropped:
+            logger.info(
+                "[%s] Context budget trimmed %d meeting summar(y/ies), %d history message(s) "
+                "(meeting_tokens=%d history_tokens=%d available=%d)",
+                incoming.channel_id, assembled.meetings_dropped, assembled.history_dropped,
+                assembled.meeting_tokens, assembled.history_tokens, self._context.available_tokens,
+            )
+
+        meetings_text = "\n\n".join(assembled.meeting_summaries) or \
+            "No meeting context recorded yet for this channel."
 
         system_text = SYSTEM_PROMPT.format(
             comm_platform  = self.comm.display_name,
@@ -630,21 +953,10 @@ class AgentBridge:
             tier           = tier,
         )
 
-        # ── 6. Retrieve channel memory ───────────────────────────────────────
-        history = self._memory.get(incoming.channel_id)
-        # Meeting transcripts are surfaced through the system prompt section
-        # above — drop the full SystemMessage copies from history so the same
-        # transcript isn't fed through twice.
-        history = [
-            m for m in history
-            if not (isinstance(m, SystemMessage)
-                    and m.content.startswith("[MEETING CONTEXT"))
-        ]
-
-        # Full message list: system + history + new user message
+        # Full message list: system + budgeted history + new user message
         all_messages: list[BaseMessage] = (
             [SystemMessage(content=system_text)]
-            + history
+            + assembled.history
             + [HumanMessage(content=incoming.content)]
         )
 

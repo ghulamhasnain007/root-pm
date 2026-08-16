@@ -158,10 +158,41 @@ class MemoryStore(ABC):
 
     @abstractmethod
     def get_meeting_context(self, channel_id: str) -> list[str]:
-        """Return formatted meeting summaries for the system prompt."""
+        """Return the most recent formatted meeting summaries for a channel,
+        newest first. Used as a fallback when no query is available or the
+        store doesn't support relevance ranking."""
         ...
 
     @abstractmethod
     def clear(self, channel_id: str) -> None:
         """Clear all memory for a channel."""
         ...
+
+    # ── Optional capabilities ───────────────────────────────────────────────
+    # Concrete no-op/empty defaults so ChannelMemoryStore (the standalone,
+    # no-Redis/Mongo fallback) doesn't need to implement long-term-memory
+    # features it has no backing store for. DualMemoryStore overrides these.
+
+    def get_relevant_meeting_context(
+        self, channel_id: str, query: str, project_key: str | None = None, top_k: int = 3
+    ) -> list[str]:
+        """Return formatted meeting summaries ranked by relevance to `query`
+        (semantic search when available, else falls back to recency)."""
+        return self.get_meeting_context(channel_id)[-top_k:]
+
+    def get_action_items(
+        self, project_key: str, owner: str | None = None, status: str = "open"
+    ) -> list[dict[str, Any]]:
+        """Return tracked action items for a project, optionally filtered by
+        owner. Empty list when the store has no durable project memory."""
+        return []
+
+    def remember_fact(self, project_key: str, fact: str, source: str = "chat") -> None:
+        """Persist a durable, project-scoped fact outside of any single
+        conversation or meeting (a no-op for stores without long-term
+        storage)."""
+        return None
+
+    def recall_facts(self, project_key: str, topic: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        """Retrieve durable project facts, optionally filtered by topic."""
+        return []

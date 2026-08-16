@@ -116,12 +116,28 @@ def _build_memory_store(cfg: dict):
     # Ensure indexes for efficient queries
     try:
         db.meetings.create_index("text_channel_id")
+        db.meetings.create_index("project_key")
         db.meetings.create_index("ended_at")
-        db.meetings.create_index("consolidated")
+        db.meetings.create_index([("consolidated", 1), ("consolidating", 1), ("ended_at", 1)])
         db.meetings.create_index("meeting_id", unique=True)
         db.project_context.create_index("_id")
+        db.project_facts.create_index([("project_key", 1), ("superseded", 1)])
+        db.meeting_chunks.create_index("meeting_id")
+        db.meeting_chunks.create_index("channel_id")
+        db.meeting_chunks.create_index([("project_key", 1), ("ended_at", -1)])
     except Exception as e:
         logger.warning("Failed to create MongoDB indexes: %s", e)
+
+    embeddings = None
+    try:
+        from core.embeddings import EmbeddingProvider
+        gemini_key = cfg.get("llm", {}).get("gemini_api_key", "") or os.environ.get("GEMINI_API_KEY", "")
+        embedding_model = os.environ.get("EMBEDDING_MODEL", "models/text-embedding-004")
+        embeddings = EmbeddingProvider(api_key=gemini_key, model=embedding_model)
+        if embeddings.available:
+            logger.info("Semantic memory search enabled (model: %s)", embedding_model)
+    except Exception as e:
+        logger.info("Semantic memory search unavailable: %s", e)
 
     return DualMemoryStore(
         redis_client=r,
@@ -129,6 +145,9 @@ def _build_memory_store(cfg: dict):
         max_messages=cfg.get("redis", {}).get("max_history_per_channel", 50),
         history_ttl_seconds=cfg.get("redis", {}).get("history_ttl_days", 7) * 86400,
         meeting_ttl_seconds=cfg.get("redis", {}).get("meeting_ttl_hours", 24) * 3600,
+        embeddings=embeddings,
+        chunk_tokens=int(os.environ.get("MEMORY_CHUNK_TOKENS", "400")),
+        chunk_overlap_tokens=int(os.environ.get("MEMORY_CHUNK_OVERLAP", "60")),
     )
 
 
