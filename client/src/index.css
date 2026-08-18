@@ -1,0 +1,139 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ────────────────────────────────────────────────────────────────────────
+   This app renders two visually distinct sections (config dashboard pages,
+   voice bot pages) that came from two different design systems. The config
+   dashboard's variables are kept as CSS custom properties (harmless to
+   define globally), but its element-level resets (body background, input
+   styling) are scoped under `.config-scope` rather than applied globally —
+   the original agent-bridge index.css applied these to `html, body, #root`
+   and bare `input/select/textarea` selectors, which would otherwise
+   silently override every Tailwind-styled input on the voice bot pages.
+   `.config-scope` is applied by <Shell> around the config page outlet only.
+   ──────────────────────────────────────────────────────────────────────── */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+:root {
+  /* Surfaces */
+  --c-void:    #0D1117;
+  --c-base:    #161B27;
+  --c-raised:  #1E2535;
+  --c-hover:   #293246;
+  --c-active:  #2E3A52;
+
+  /* Borders */
+  --c-border:  #1F2A3E;
+  --c-border2: #2A3550;
+
+  /* Accents */
+  --c-blue:    #3B82F6;
+  --c-blue-lo: rgba(59,130,246,.12);
+  --c-blue-md: rgba(59,130,246,.22);
+  --c-green:   #10B981;
+  --c-green-lo:rgba(16,185,129,.12);
+  --c-amber:   #F59E0B;
+  --c-amber-lo:rgba(245,158,11,.12);
+  --c-red:     #EF4444;
+  --c-red-lo:  rgba(239,68,68,.12);
+  --c-violet:  #8B5CF6;
+
+  /* Text */
+  --t-hi:   #F1F5FD;
+  --t-mid:  #8B95B0;
+  --t-lo:   #4A5470;
+  --t-inv:  #0D1117;
+
+  /* Type */
+  --font:   'Inter', system-ui, sans-serif;
+  --mono:   'JetBrains Mono', 'Fira Code', monospace;
+
+  /* Space */
+  --r:    6px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+
+  /* Layout */
+  --sidebar-w: 240px;
+  --topbar-h:  56px;
+}
+
+html, body, #root { height: 100%; }
+
+/* Shared: thin scrollbar for both design systems */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--c-border2); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--t-lo); }
+
+/* Shared: focus ring */
+:focus-visible {
+  outline: 2px solid var(--c-blue);
+  outline-offset: 2px;
+  border-radius: var(--r);
+}
+
+/* Respect the OS-level "reduce motion" preference across both page sets */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Config-dashboard-only element resets (see note above) ── */
+.config-scope {
+  background: var(--c-void);
+  color: var(--t-hi);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100%;
+}
+.config-scope input,
+.config-scope select,
+.config-scope textarea {
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--t-hi);
+  background: var(--c-raised);
+  border: 1px solid var(--c-border2);
+  border-radius: var(--r);
+  width: 100%;
+  padding: 0 11px;
+  height: 36px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  outline: none;
+}
+.config-scope input::placeholder { color: var(--t-lo); }
+.config-scope input:focus,
+.config-scope select:focus,
+.config-scope textarea:focus {
+  border-color: var(--c-blue);
+  box-shadow: 0 0 0 3px var(--c-blue-lo);
+}
+.config-scope input[type="password"] { font-family: var(--mono); letter-spacing: 0.08em; }
+.config-scope select { cursor: pointer; }
+.config-scope select option { background: var(--c-raised); }
+.config-scope textarea { height: auto; padding: 10px 11px; resize: vertical; line-height: 1.6; }
+.config-scope input[type="number"] { -moz-appearance: textfield; }
+.config-scope input[type="number"]::-webkit-outer-spin-button,
+.config-scope input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
+
+/* ── Shared animations (both design systems draw from this set) ── */
+@keyframes fadeIn    { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+@keyframes fadeSlideUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes spin      { to { transform: rotate(360deg); } }
+@keyframes pulse     { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+@keyframes blink     { 0%,100% { opacity:1; } 50% { opacity:.2; } }
+@keyframes slideUp   { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:none; } }
+@keyframes progress  { from { width:0; } }
+
+.fade-in   { animation: fadeIn  0.2s ease both; }
+.slide-up  { animation: slideUp 0.25s ease both; }
+.anim-in   { animation: fadeSlideUp 0.25s ease-out; }
+.spinning  { animation: spin 0.8s linear infinite; }

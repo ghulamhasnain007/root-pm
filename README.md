@@ -13,8 +13,7 @@ Kafka connects them: voice-created tasks are mirrored to Taiga, meeting transcri
 ```bash
 cp .env.example .env   # fill in your credentials
 docker compose up -d
-open http://localhost:5173   # voice bot dashboard
-open http://localhost:5174   # agent-bridge config dashboard
+open http://localhost:5173   # unified client (config dashboard + voice console)
 open http://localhost:8080   # Kafka UI
 ```
 
@@ -27,9 +26,8 @@ bash scripts/start-dev.sh
 | Service | Port | URL |
 |---|---|---|
 | Voice bot backend | 3001 | http://localhost:3001 |
-| Voice bot frontend | 5173 | http://localhost:5173 |
 | Agent Bridge config API | 8000 | http://localhost:8000 |
-| Agent Bridge dashboard | 5174 | http://localhost:5174 |
+| Client (unified dashboard) | 5173 | http://localhost:5173 |
 | Kafka | 9092/9093 | — |
 | Kafka UI | 8080 | http://localhost:8080 |
 

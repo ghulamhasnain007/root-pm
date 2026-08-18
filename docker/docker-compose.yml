@@ -1,11 +1,12 @@
 # ── Full Event-Driven Stack ───────────────────────────────────────────────────
-# Services: Kafka (KRaft) · Kafka UI · voice bot · voice frontend ·
-#           agent-bridge bot · agent-bridge config API · agent-bridge dashboard
+# Services: Kafka (KRaft) · Kafka UI · voice bot · agent-bridge bot ·
+#           agent-bridge config API · client (unified dashboard, port 5173)
 #
 # Usage:
 #   docker compose up -d                   start everything
 #   docker compose logs -f voice-bot       voice bot logs
 #   docker compose logs -f agent-bot       text bot logs
+#   docker compose logs -f client          unified frontend logs
 #   docker compose down                    stop everything
 
 services:
@@ -104,17 +105,7 @@ services:
       - project-net
 
   # ── Voice bot frontend ────────────────────────────────────────────────────
-  voice-frontend:
-    build:
-      context: ../scrum-master-ai/frontend
-      dockerfile: Dockerfile
-    container_name: voice-frontend
-    restart: unless-stopped
-    env_file: ../scrum-master-ai/frontend/.env
-    ports:
-      - "5173:80"
-    networks:
-      - project-net
+  # (removed — merged into the single `client` service below, see its comment)
 
   # ── Redis (short-term memory) ─────────────────────────────────────────────
   redis:
@@ -188,15 +179,23 @@ services:
     networks:
       - project-net
 
-  # ── Agent Bridge dashboard (React) ────────────────────────────────────────
-  agent-dashboard:
+  # ── Unified client (config dashboard + voice bot console) ─────────────────
+  # Replaces the two previously-separate frontends (voice-frontend on 5173,
+  # agent-dashboard on 5174) with a single React app that talks to both
+  # backends — see client/nginx.conf for the /api and /integrations routing.
+  # Kept on port 5173 so existing OAuth provider redirect URIs (Discord,
+  # Zoom, Google Meet, Teams) continue to work unchanged.
+  client:
     build:
-      context: ../agent-bridge/frontend
+      context: ../client
       dockerfile: Dockerfile
-    container_name: agent-dashboard
+    container_name: client
     restart: unless-stopped
     ports:
-      - "5174:80"
+      - "5173:80"
+    depends_on:
+      - config-api
+      - voice-bot
     networks:
       - project-net
 

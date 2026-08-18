@@ -4,8 +4,7 @@
   "private": true,
   "workspaces": [
     "scrum-master-ai/backend",
-    "scrum-master-ai/frontend",
-    "agent-bridge/frontend"
+    "client"
   ],
   "scripts": {
     "dev": "bash scripts/start-dev.sh",

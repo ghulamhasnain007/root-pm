@@ -2,7 +2,7 @@
 
 ## Adding a new Taiga project
 
-1. Open the Agent Bridge dashboard at http://localhost:5174
+1. Open the client at http://localhost:5173 (Channel map is under the config dashboard section)
 2. Go to Channel map → Add row
 3. Enter the Discord guild ID, channel ID, and Taiga project slug
 4. Save — the bot picks up the new mapping immediately (no restart needed)
