@@ -1,12 +1,14 @@
 # ── Full Event-Driven Stack ───────────────────────────────────────────────────
 # Services: Kafka (KRaft) · Kafka UI · voice bot · agent-bridge bot ·
-#           agent-bridge config API · client (unified dashboard, port 5173)
+#           agent-bridge config API · client (unified dashboard, port 5173) ·
+#           auth-service (org/staff/sessions, port 4000, standalone for now)
 #
 # Usage:
 #   docker compose up -d                   start everything
 #   docker compose logs -f voice-bot       voice bot logs
 #   docker compose logs -f agent-bot       text bot logs
 #   docker compose logs -f client          unified frontend logs
+#   docker compose logs -f auth-service    auth service logs
 #   docker compose down                    stop everything
 
 services:
@@ -138,6 +140,43 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - project-net
+
+  # ── Auth service (org registration, staff, sessions) ─────────────────────
+  # Phase 1 of the multi-tenancy plan (see project docs) — standalone,
+  # not yet consumed by agent-bot/voice-bot (that's later phases). Uses a
+  # separate Redis DB index (2) from agent-bridge's memory store (0), on
+  # the same Redis instance — refresh-token session data and conversation
+  # memory are unrelated and shouldn't share a keyspace.
+  auth-service:
+    build:
+      context: ../auth-service
+      dockerfile: Dockerfile
+    container_name: auth-service
+    restart: unless-stopped
+    environment:
+      STORAGE: mongo
+      MONGO_URI: mongodb://mongo:27017/auth-service
+      SESSION_STORE: redis
+      REDIS_URL: redis://redis:6379/2
+      CLIENT_BASE_URL: http://localhost:5173
+      CORS_ORIGIN: http://localhost:5173
+      AUTH_JWT_PRIVATE_KEY: ${AUTH_JWT_PRIVATE_KEY:-}
+      AUTH_JWT_PUBLIC_KEY: ${AUTH_JWT_PUBLIC_KEY:-}
+      EMAIL_PROVIDER: ${AUTH_EMAIL_PROVIDER:-console}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      EMAIL_FROM: ${EMAIL_FROM:-Root-PM <no-reply@root-pm.local>}
+    ports:
+      - "4000:4000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - project-net
 

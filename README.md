@@ -28,8 +28,14 @@ bash scripts/start-dev.sh
 | Voice bot backend | 3001 | http://localhost:3001 |
 | Agent Bridge config API | 8000 | http://localhost:8000 |
 | Client (unified dashboard) | 5173 | http://localhost:5173 |
+| Auth service (orgs/staff/sessions) | 4000 | http://localhost:4000 |
 | Kafka | 9092/9093 | — |
 | Kafka UI | 8080 | http://localhost:8080 |
+
+`auth-service` is currently standalone (Phase 1 of the multi-tenancy plan) —
+org registration, email verification, staff invites, and sessions all work
+end to end, but `agent-bridge`/`scrum-master-ai` don't consume it yet and
+`client` has no login screen yet. See `auth-service/README.md`.
 
 ## Docs
 - [Architecture overview](docs/ARCHITECTURE.md)

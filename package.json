@@ -4,7 +4,8 @@
   "private": true,
   "workspaces": [
     "scrum-master-ai/backend",
-    "client"
+    "client",
+    "auth-service"
   ],
   "scripts": {
     "dev": "bash scripts/start-dev.sh",
