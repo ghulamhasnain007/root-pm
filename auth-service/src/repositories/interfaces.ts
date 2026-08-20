@@ -1,4 +1,4 @@
-import type { AuditEntry, EmailVerification, Invite, Organization, User } from '../domain/types.js'
+import type { AuditEntry, EmailVerification, Invite, Organization, ToolCategory, ToolConfig, ToolStatus, User } from '../domain/types.js'
 
 /**
  * Repository interfaces, mirroring the abstraction pattern already used in
@@ -46,10 +46,18 @@ export interface AuditRepository {
   listByOrg(orgId: string, limit?: number): Promise<AuditEntry[]>
 }
 
+export interface ToolConfigRepository {
+  upsert(orgId: string, category: ToolCategory, toolId: string, patch: { encryptedPayload: string; status: ToolStatus; configuredBy: string }): Promise<ToolConfig>
+  findByOrgAndTool(orgId: string, toolId: string): Promise<ToolConfig | null>
+  findAllByOrg(orgId: string): Promise<ToolConfig[]>
+  delete(orgId: string, toolId: string): Promise<void>
+}
+
 export interface Repositories {
   orgs: OrgRepository
   users: UserRepository
   emailVerifications: EmailVerificationRepository
   invites: InviteRepository
   audit: AuditRepository
+  toolConfigs: ToolConfigRepository
 }

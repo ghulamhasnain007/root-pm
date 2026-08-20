@@ -2,7 +2,10 @@ import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../src/http/server.js'
 import { createMemoryRepositories } from '../src/repositories/memory/index.js'
 import { InMemoryRefreshTokenStore } from '../src/services/InMemoryRefreshTokenStore.js'
+import { ToolCredentialCipher } from '../src/crypto/ToolCredentialCipher.js'
+import { NoopEventPublisher } from '../src/services/ToolConfigEventPublisher.js'
 import type { EmailMessage, EmailSender } from '../src/email/EmailSender.js'
+import { randomBytes } from 'node:crypto'
 
 export class SpyEmailSender implements EmailSender {
   sent: EmailMessage[] = []
@@ -20,12 +23,17 @@ export class SpyEmailSender implements EmailSender {
   }
 }
 
+export const TEST_INTERNAL_SERVICE_KEY = 'test-internal-key-do-not-use-in-prod'
+
 export function buildTestApp(): { app: FastifyInstance; email: SpyEmailSender } {
   const email = new SpyEmailSender()
   const app = buildApp({
     repos: createMemoryRepositories(),
     refreshTokens: new InMemoryRefreshTokenStore(30 * 24 * 3600),
     email,
+    cipher: new ToolCredentialCipher(randomBytes(32).toString('base64')),
+    toolConfigEvents: new NoopEventPublisher(),
+    internalServiceKey: TEST_INTERNAL_SERVICE_KEY,
     clientBaseUrl: 'http://localhost:5173',
     accessTokenTtlSeconds: 900,
     emailVerificationTtlHours: 24,

@@ -1,8 +1,8 @@
 import mongoosePkg, { type HydratedDocument } from 'mongoose'
 const { Schema, model, models, connect } = mongoosePkg
-import type { AuditEntry, DashboardRole, EmailVerification, Invite, Organization, User } from '../../domain/types.js'
+import type { AuditEntry, DashboardRole, EmailVerification, Invite, Organization, ToolCategory, ToolConfig, ToolStatus, User } from '../../domain/types.js'
 import type {
-  AuditRepository, EmailVerificationRepository, InviteRepository, OrgRepository, Repositories, UserRepository,
+  AuditRepository, EmailVerificationRepository, InviteRepository, OrgRepository, Repositories, ToolConfigRepository, UserRepository,
 } from '../interfaces.js'
 
 // ── Schemas ──────────────────────────────────────────────────────────────
@@ -53,6 +53,17 @@ const AuditSchema = new Schema<AuditEntry>({
 }, { timestamps: { createdAt: 'timestamp', updatedAt: false } })
 const AuditModel = models.AuditEntry ?? model<AuditEntry>('AuditEntry', AuditSchema)
 
+const ToolConfigSchema = new Schema<ToolConfig>({
+  orgId: { type: String, required: true, index: true },
+  category: { type: String, enum: ['communication', 'project_management', 'meeting_provider'], required: true },
+  toolId: { type: String, required: true },
+  encryptedPayload: { type: String, required: true },
+  status: { type: String, enum: ['connected', 'error', 'disconnected'], default: 'connected' },
+  configuredBy: { type: String, required: true },
+}, { timestamps: true })
+ToolConfigSchema.index({ orgId: 1, toolId: 1 }, { unique: true })
+const ToolConfigModel = models.ToolConfig ?? model<ToolConfig>('ToolConfig', ToolConfigSchema)
+
 // ── Doc → domain-type mapping ───────────────────────────────────────────
 // Mongoose documents carry `_id` (ObjectId) plus Mongoose-internal fields;
 // domain types use a plain `id: string`. Centralizing the mapping here
@@ -85,6 +96,13 @@ function toAudit(d: HydratedDocument<AuditEntry>): AuditEntry {
   return {
     id: d.id, orgId: d.orgId, actorUserId: d.actorUserId, action: d.action as any,
     target: d.target, metadata: d.metadata, timestamp: (d as any).timestamp,
+  }
+}
+function toToolConfig(d: HydratedDocument<ToolConfig>): ToolConfig {
+  return {
+    id: d.id, orgId: d.orgId, category: d.category, toolId: d.toolId,
+    encryptedPayload: d.encryptedPayload, status: d.status, configuredBy: d.configuredBy,
+    createdAt: (d as any).createdAt, updatedAt: (d as any).updatedAt,
   }
 }
 
@@ -164,6 +182,27 @@ export class MongoAuditRepository implements AuditRepository {
   }
 }
 
+export class MongoToolConfigRepository implements ToolConfigRepository {
+  async upsert(orgId: string, category: ToolCategory, toolId: string, patch: { encryptedPayload: string; status: ToolStatus; configuredBy: string }) {
+    const d = await ToolConfigModel.findOneAndUpdate(
+      { orgId, toolId },
+      { $set: { category, ...patch }, $setOnInsert: { orgId, toolId } },
+      { new: true, upsert: true }
+    )
+    return toToolConfig(d!)
+  }
+  async findByOrgAndTool(orgId: string, toolId: string) {
+    const d = await ToolConfigModel.findOne({ orgId, toolId })
+    return d ? toToolConfig(d) : null
+  }
+  async findAllByOrg(orgId: string) {
+    return (await ToolConfigModel.find({ orgId })).map(toToolConfig)
+  }
+  async delete(orgId: string, toolId: string) {
+    await ToolConfigModel.deleteOne({ orgId, toolId })
+  }
+}
+
 export async function connectMongo(uri: string): Promise<void> {
   await connect(uri)
 }
@@ -175,5 +214,6 @@ export function createMongoRepositories(): Repositories {
     emailVerifications: new MongoEmailVerificationRepository(),
     invites: new MongoInviteRepository(),
     audit: new MongoAuditRepository(),
+    toolConfigs: new MongoToolConfigRepository(),
   }
 }

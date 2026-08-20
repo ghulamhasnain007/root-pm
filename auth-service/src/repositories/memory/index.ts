@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import type { AuditEntry, EmailVerification, Invite, Organization, User } from '../../domain/types.js'
+import type { AuditEntry, EmailVerification, Invite, Organization, ToolCategory, ToolConfig, ToolStatus, User } from '../../domain/types.js'
 import type {
-  AuditRepository, EmailVerificationRepository, InviteRepository, OrgRepository, Repositories, UserRepository,
+  AuditRepository, EmailVerificationRepository, InviteRepository, OrgRepository, Repositories, ToolConfigRepository, UserRepository,
 } from '../interfaces.js'
 
 export class MemoryOrgRepository implements OrgRepository {
@@ -105,6 +105,37 @@ export class MemoryAuditRepository implements AuditRepository {
   }
 }
 
+export class MemoryToolConfigRepository implements ToolConfigRepository {
+  private byKey = new Map<string, ToolConfig>() // key: `${orgId}:${toolId}`
+  private key(orgId: string, toolId: string) { return `${orgId}:${toolId}` }
+
+  async upsert(orgId: string, category: ToolCategory, toolId: string, patch: { encryptedPayload: string; status: ToolStatus; configuredBy: string }) {
+    const k = this.key(orgId, toolId)
+    const existing = this.byKey.get(k)
+    const now = new Date()
+    const full: ToolConfig = {
+      id: existing?.id ?? randomUUID(),
+      orgId, category, toolId,
+      encryptedPayload: patch.encryptedPayload,
+      status: patch.status,
+      configuredBy: patch.configuredBy,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    }
+    this.byKey.set(k, full)
+    return full
+  }
+  async findByOrgAndTool(orgId: string, toolId: string) {
+    return this.byKey.get(this.key(orgId, toolId)) ?? null
+  }
+  async findAllByOrg(orgId: string) {
+    return [...this.byKey.values()].filter(t => t.orgId === orgId)
+  }
+  async delete(orgId: string, toolId: string) {
+    this.byKey.delete(this.key(orgId, toolId))
+  }
+}
+
 export function createMemoryRepositories(): Repositories {
   return {
     orgs: new MemoryOrgRepository(),
@@ -112,5 +143,6 @@ export function createMemoryRepositories(): Repositories {
     emailVerifications: new MemoryEmailVerificationRepository(),
     invites: new MemoryInviteRepository(),
     audit: new MemoryAuditRepository(),
+    toolConfigs: new MemoryToolConfigRepository(),
   }
 }

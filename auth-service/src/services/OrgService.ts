@@ -6,7 +6,7 @@ import { generateSecureToken, hashToken } from '../crypto/secureToken.js'
 import { Errors } from '../errors.js'
 import type { Organization, User } from '../domain/types.js'
 
-function slugify(name: string): string {
+export function slugify(name: string): string {
   return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'org'
 }
 

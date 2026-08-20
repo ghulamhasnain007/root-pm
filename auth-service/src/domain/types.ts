@@ -83,6 +83,8 @@ export type AuditAction =
   | 'staff.invite_revoked'
   | 'staff.role_changed'
   | 'staff.removed'
+  | 'tool.configured'
+  | 'tool.removed'
 
 export interface AuditEntry {
   id: string
@@ -92,4 +94,29 @@ export interface AuditEntry {
   target: string | null
   metadata: Record<string, unknown>
   timestamp: Date
+}
+
+/**
+ * Generic, per-org tool credential storage — deliberately not "Discord" or
+ * "Taiga" shaped. `category` is a coarse grouping (matches the existing
+ * CommunicationPlatform/ProjectManagementPlatform/meeting-provider
+ * abstractions already in agent-bridge and scrum-master-ai); `toolId` is a
+ * free-form string ('discord', 'slack', 'taiga', 'jira', 'clickup', ...).
+ * Adding a new tool never requires a schema change here — only a new
+ * adapter in whichever service actually talks to that tool's API.
+ */
+export type ToolCategory = 'communication' | 'project_management' | 'meeting_provider'
+export type ToolStatus = 'connected' | 'error' | 'disconnected'
+
+export interface ToolConfig {
+  id: string
+  orgId: string
+  category: ToolCategory
+  toolId: string
+  /** AES-256-GCM ciphertext of a JSON credentials map — see ToolCredentialCipher. */
+  encryptedPayload: string
+  status: ToolStatus
+  configuredBy: string // userId
+  createdAt: Date
+  updatedAt: Date
 }

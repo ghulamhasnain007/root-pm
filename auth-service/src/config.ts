@@ -18,6 +18,36 @@ const EnvSchema = z.object({
   EMAIL_VERIFICATION_TTL_HOURS: z.coerce.number().default(24),
   INVITE_TTL_DAYS: z.coerce.number().default(7),
 
+  // AES-256-GCM key (base64, 32 bytes) for encrypting org tool credentials
+  // at rest. Generate with:
+  //   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+  // If unset, an ephemeral key is generated at boot — fine for dev/test,
+  // NOT for production (every restart makes existing stored credentials
+  // undecryptable, since the key that encrypted them is gone).
+  TOOL_CREDENTIAL_ENCRYPTION_KEY: z.string().optional(),
+
+  // Shared secret for service-to-service credential fetches (agent-bridge,
+  // scrum-master-ai). If unset, an ephemeral one is generated at boot and
+  // logged once — fine for a single-process dev setup where you can copy
+  // it, NOT for production (other services need a stable, out-of-band
+  // configured value).
+  INTERNAL_SERVICE_KEY: z.string().optional(),
+
+  // Org registration seeding for migrating an existing single-tenant
+  // deployment (see src/migration/seedDefaultOrg.ts). Off by default.
+  SEED_DEFAULT_ORG: z.coerce.boolean().default(false),
+  SEED_ADMIN_EMAIL: z.string().optional(),
+  SEED_ADMIN_PASSWORD: z.string().optional(),
+  SEED_ADMIN_NAME: z.string().default('Admin'),
+  SEED_ORG_NAME: z.string().default('Default Organization'),
+  // Legacy single-tenant env vars, read only by the seed script to
+  // populate the seeded org's tool configs — same variable names
+  // agent-bridge/scrum-master-ai already use.
+  SEED_TAIGA_URL: z.string().optional(),
+  SEED_TAIGA_USER: z.string().optional(),
+  SEED_TAIGA_PASS: z.string().optional(),
+  SEED_DISCORD_BOT_TOKEN: z.string().optional(),
+
   // RS256 key pair (PEM). If unset, an ephemeral pair is generated at boot
   // — fine for dev/test, NOT for production (see src/crypto/jwt.ts).
   AUTH_JWT_PRIVATE_KEY: z.string().optional(),
