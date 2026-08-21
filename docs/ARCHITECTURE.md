@@ -3,6 +3,32 @@
 ## System diagram
 
 ```
+                              ┌─────────────────────────────────────────┐
+                              │             auth-service                │
+                              │  (Fastify + MongoDB + Redis + Kafka)    │
+                              │  • JWT auth (register, login, refresh)  │
+                              │  • Org / staff management               │
+                              │  • Per-org tool config (AES-256-GCM)    │
+                              │  • GET /internal/tools/:id/orgs         │
+                              └──────────┬───────────┬─────────────────┘
+                                         │           │
+                            Kafka event   │           │  HTTP (service-to-service)
+                            (config.*)    │           │
+              ┌──────────────────────────┘           └──────────────────────────┐
+              ▼                                                                ▼
+┌──────────────────────────┐                              ┌──────────────────────────────┐
+│   scrum-master-ai (TS)   │                              │     agent-bridge (Python)     │
+│                          │                              │                              │
+│  BotConnectionManager    │  ◄── Kafka: config-events    │  DiscordPlatformManager      │
+│    • discover orgs       │      (tool-config.updated)   │    • discover orgs           │
+│    • connect per org     │      (tool-config.removed)   │    • connect per org         │
+│    • 1:N Discord clients │                              │    • 1:N Discord platforms   │
+│                          │                              │                              │
+│  Kafka producers:        │                              │  ConfigEventConsumer:        │
+│    • task-events         │  ──► Kafka ──►               │    • handle config.updated   │
+│    • meeting-events      │      ◄── Kafka ◄──           │    • handle config.removed   │
+└──────────────────────────┘                              └──────────────────────────────┘
+
 Discord Voice ──► scrum-master-ai ──► TaigaTaskStore ──► Taiga   (direct, when TAIGA_* set)
       │                  │             └─ or ─► KafkaTaskStore ──► MongoDB
       │           MeetingEventPublisher                  │
@@ -24,6 +50,19 @@ Discord Text ──► agent-bridge ──► LangChain Agent ──────
     @mention          │            (sees meeting context)
                       └──► Taiga REST API
 ```
+
+## Multi-tenancy architecture
+
+Each org has:
+- **Own Discord bot token** (bring-your-own) — stored encrypted (AES-256-GCM) in auth-service `tool_configs` collection
+- **Own set of staff members** — with roles (owner, admin, member)
+- **Own connection(s)** — BotConnectionManager (scrum-master-ai) and DiscordPlatformManager (agent-bridge) each maintain 1:N Discord clients
+
+Org discovery is **hybrid**:
+1. **Startup cold-start**: `GET /internal/tools/:toolId/orgs` from auth-service
+2. **Live updates**: Kafka events on `agent-bridge.config-events` topic (`tool-config.updated`, `tool-config.removed`)
+
+The client dashboard requires JWT authentication and shows per-org staff, tool config, and connection status.
 
 When `TAIGA_URL`/`TAIGA_USER`/`TAIGA_PASS`/`TAIGA_PROJECT_SLUG` are set for the
 voice bot, the ambient assistant uses `TaigaTaskStore` and reads/writes the real
@@ -82,3 +121,4 @@ merges results by meeting.
 |---|---|---|
 | `agent-bridge.task-events` | `orgId:channelId` | task.created, task.closed, task.updated |
 | `agent-bridge.meeting-events` | `orgId:channelId` | meeting.started, meeting.transcript, meeting.ended |
+| `agent-bridge.config-events` | `toolId` | tool-config.updated, tool-config.removed |

@@ -111,7 +111,31 @@ export type TaskEvent = TaskCreatedEvent | TaskClosedEvent | TaskUpdatedEvent;
 export type MeetingEvent = MeetingStartedEvent | MeetingTranscriptEvent | MeetingEndedEvent;
 export type AnyBridgeEvent = TaskEvent | MeetingEvent;
 
+// ── Config events (auth-service → bot managers) ──────────────────────────────
+
+export interface ToolConfigUpdatedEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  eventType: 'tool-config.updated';
+  sourceSystem: 'auth-service';
+  publishedAt: number;
+  orgId: string;
+  toolId: string;
+  status: 'connected' | 'failed' | 'pending' | 'configured';
+}
+
+export interface ToolConfigRemovedEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  eventType: 'tool-config.removed';
+  sourceSystem: 'auth-service';
+  publishedAt: number;
+  orgId: string;
+  toolId: string;
+}
+
+export type ToolConfigEvent = ToolConfigUpdatedEvent | ToolConfigRemovedEvent;
+
 export const TOPICS = {
   TASK_EVENTS:    'agent-bridge.task-events',
   MEETING_EVENTS: 'agent-bridge.meeting-events',
+  CONFIG_EVENTS:  'agent-bridge.config-events',
 } as const;

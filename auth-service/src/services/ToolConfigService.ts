@@ -46,6 +46,11 @@ export class ToolConfigService {
     return all.map(t => this.toSummary(t))
   }
 
+  async listOrgsForTool(toolId: string): Promise<Array<{ orgId: string; status: ToolConfig['status'] }>> {
+    const all = await this.repos.toolConfigs.findAllByTool(toolId)
+    return all.map(t => ({ orgId: t.orgId, status: t.status }))
+  }
+
   async removeTool(orgId: string, toolId: string, actorUserId: string): Promise<void> {
     const existing = await this.repos.toolConfigs.findByOrgAndTool(orgId, toolId)
     if (!existing) throw Errors.notFound('Tool configuration')

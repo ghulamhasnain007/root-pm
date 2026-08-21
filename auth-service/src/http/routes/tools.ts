@@ -53,4 +53,18 @@ export function registerToolRoutes(app: FastifyInstance, deps: { toolConfigServi
     }
     return { credentials }
   })
+
+  // ── Internal: list orgs that have a given tool configured ───────────────
+  // Used by bot managers at startup to discover which orgs to connect.
+  app.get('/internal/tools/:toolId/orgs', {
+    preHandler: requireInternalKey(internalServiceKey),
+  }, async (request, reply) => {
+    const { toolId } = request.params as { toolId: string }
+    const configs = await toolConfigService.listOrgsForTool(toolId)
+    if (configs.length === 0) {
+      reply.code(404)
+      return { code: 'NOT_FOUND', message: 'No orgs have this tool configured' }
+    }
+    return { orgs: configs }
+  })
 }

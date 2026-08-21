@@ -1,15 +1,9 @@
 /**
  * Published whenever an org's tool credentials change, so agent-bridge and
- * scrum-master-ai can invalidate their short-TTL credential caches within
- * seconds instead of waiting for the cache to naturally expire or the
- * process to restart.
+ * scrum-master-ai can react to config changes in real-time via Kafka.
  *
- * NOT wired to real Kafka yet — that lands with Phase 4 (agent-bridge
- * consumer) since there's no consumer to test against until then, and
- * standing up a Kafka producer with nothing reading from it isn't
- * verifiable. `NoopEventPublisher` is what's actually used for now; this
- * interface is the seam so ToolConfigService doesn't change when the real
- * publisher is added later.
+ * KafkaEventPublisher publishes to the agent-bridge.config-events topic.
+ * NoopEventPublisher is retained as a fallback when Kafka is not configured.
  */
 export interface ToolConfigEvent {
   orgId: string
@@ -23,6 +17,26 @@ export interface ToolConfigEventPublisher {
 
 export class NoopEventPublisher implements ToolConfigEventPublisher {
   async publish(_event: ToolConfigEvent): Promise<void> {
-    // intentionally a no-op — see file header
+    // intentionally a no-op — used when Kafka is not configured
+  }
+}
+
+export class KafkaEventPublisher implements ToolConfigEventPublisher {
+  private connected = false;
+
+  async connect(brokers: string[]): Promise<void> {
+    const { connectProducer } = await import('../kafka/producer.js')
+    await connectProducer(brokers)
+    this.connected = true
+  }
+
+  async publish(event: ToolConfigEvent): Promise<void> {
+    if (!this.connected) return
+    const { publishToolConfigEvent } = await import('../kafka/producer.js')
+    await publishToolConfigEvent({
+      orgId: event.orgId,
+      toolId: event.toolId,
+      action: event.action,
+    })
   }
 }

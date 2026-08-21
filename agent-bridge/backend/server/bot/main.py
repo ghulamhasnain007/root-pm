@@ -38,6 +38,9 @@ import platforms.pm.linear_platform              # noqa: F401
 
 from core.registry import PlatformRegistry
 from agent.agent import AgentBridge, DualMemoryStore, ChannelMemoryStore
+from platforms.communication.discord_platform_manager import DiscordPlatformManager
+from core.config_events import build_config_consumer_from_env
+from core.tool_config_consumer import setup_config_consumer
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "data" / "config.json"
@@ -227,6 +230,34 @@ async def main(config_path: str) -> None:
         "channel_map":      channel_map,
         "role_permissions": role_perms,
     })
+
+    # ── Multi-org Discord connection manager ─────────────────────────────
+    discord_manager = DiscordPlatformManager()
+    discord_manager.set_message_callback(None)  # Will be set after bridge is built
+
+    auth_service_url = os.environ.get("AUTH_SERVICE_URL", "")
+    internal_key = os.environ.get("AUTH_SERVICE_INTERNAL_KEY", "")
+    if auth_service_url and internal_key:
+        try:
+            await discord_manager.discover_and_connect(
+                auth_service_url, internal_key,
+                {"trigger_role": cfg.get("discord", {}).get("trigger_role", "FYP"),
+                 "channel_map": channel_map,
+                 "role_permissions": role_perms},
+            )
+            logger.info("DiscordPlatformManager: %d org(s) connected", len(discord_manager.get_status()))
+        except Exception as e:
+            logger.warning("DiscordPlatformManager discovery failed: %s", e)
+    else:
+        logger.info("AUTH_SERVICE_URL not set — multi-org discovery disabled, using single-org fallback")
+
+    # Wire config event consumer for live updates
+    if os.environ.get("KAFKA_BROKERS") and auth_service_url and internal_key:
+        config_consumer = build_config_consumer_from_env()
+        if config_consumer:
+            setup_config_consumer(config_consumer, discord_manager, auth_service_url, internal_key)
+            config_consumer.start()
+            logger.info("Config event consumer started")
 
     # ── Instantiate PM platform ──────────────────────────────────────────────
     pm_id = cfg.get("pm_platform", "taiga")

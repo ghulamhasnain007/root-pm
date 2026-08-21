@@ -5,6 +5,7 @@ import './index.css'
 
 import { ToastProvider } from './components/ui/Toast'
 import { ConfigProvider } from './store/ConfigContext'
+import { AuthProvider } from './store/AuthContext'
 import Shell from './components/Shell'
 
 // Config dashboard pages (from agent-bridge)
@@ -15,11 +16,23 @@ import PermissionsPage from './pages/config/PermissionsPage'
 import LLMPage from './pages/config/LLMPage'
 import AdvancedPage from './pages/config/AdvancedPage'
 import LogsPage from './pages/config/LogsPage'
+import ToolConfigPage from './pages/config/ToolConfigPage'
 
 // Voice bot pages (from scrum-master-ai)
 import { SchedulePage } from './pages/voice/SchedulePage'
 import { AmbientPage } from './pages/voice/AmbientPage'
 import { IntegrationsPage } from './pages/voice/IntegrationsPage'
+
+// Auth pages
+import LoginPage from './pages/auth/LoginPage'
+import RegisterPage from './pages/auth/RegisterPage'
+import VerifyEmailPage from './pages/auth/VerifyEmailPage'
+import AcceptInvitePage from './pages/auth/AcceptInvitePage'
+
+// Staff pages
+import StaffListPage from './pages/staff/StaffListPage'
+import StaffInvitePage from './pages/staff/StaffInvitePage'
+import StaffDetailPage from './pages/staff/StaffDetailPage'
 
 /**
  * Every meeting-platform OAuth flow (Discord, Zoom, Google Meet, Teams)
@@ -47,30 +60,44 @@ function OAuthCallbackRedirect() {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ToastProvider>
-      <ConfigProvider>
-        <BrowserRouter>
-          <OAuthCallbackRedirect />
-          <Routes>
-            <Route path="/" element={<Shell />}>
-              <Route index element={<Navigate to="/overview" replace />} />
+      <AuthProvider>
+        <ConfigProvider>
+          <BrowserRouter>
+            <OAuthCallbackRedirect />
+            <Routes>
+              {/* Auth routes (no shell) */}
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/register" element={<RegisterPage />} />
+              <Route path="/verify-email" element={<VerifyEmailPage />} />
+              <Route path="/accept-invite" element={<AcceptInvitePage />} />
 
-              {/* Config dashboard routes (agent-bridge) */}
-              <Route path="overview" element={<OverviewPage />} />
-              <Route path="platforms" element={<PlatformsPage />} />
-              <Route path="channels" element={<ChannelsPage />} />
-              <Route path="permissions" element={<PermissionsPage />} />
-              <Route path="llm" element={<LLMPage />} />
-              <Route path="advanced" element={<AdvancedPage />} />
-              <Route path="logs" element={<LogsPage />} />
+              <Route path="/" element={<Shell />}>
+                <Route index element={<Navigate to="/overview" replace />} />
 
-              {/* Voice bot routes (scrum-master-ai) */}
-              <Route path="voice/schedule" element={<SchedulePage />} />
-              <Route path="voice/ambient" element={<AmbientPage />} />
-              <Route path="voice/integrations" element={<IntegrationsPage />} />
-            </Route>
-          </Routes>
-        </BrowserRouter>
-      </ConfigProvider>
+                {/* Config dashboard routes (agent-bridge) */}
+                <Route path="overview" element={<OverviewPage />} />
+                <Route path="platforms" element={<PlatformsPage />} />
+                <Route path="channels" element={<ChannelsPage />} />
+                <Route path="permissions" element={<PermissionsPage />} />
+                <Route path="llm" element={<LLMPage />} />
+                <Route path="advanced" element={<AdvancedPage />} />
+                <Route path="tools" element={<ToolConfigPage />} />
+                <Route path="logs" element={<LogsPage />} />
+
+                {/* Staff management routes */}
+                <Route path="staff" element={<StaffListPage />} />
+                <Route path="staff/invite" element={<StaffInvitePage />} />
+                <Route path="staff/:userId" element={<StaffDetailPage />} />
+
+                {/* Voice bot routes (scrum-master-ai) */}
+                <Route path="voice/schedule" element={<SchedulePage />} />
+                <Route path="voice/ambient" element={<AmbientPage />} />
+                <Route path="voice/integrations" element={<IntegrationsPage />} />
+              </Route>
+            </Routes>
+          </BrowserRouter>
+        </ConfigProvider>
+      </AuthProvider>
     </ToastProvider>
   </React.StrictMode>
 )

@@ -33,3 +33,10 @@ kafka-data/
 # OS
 .DS_Store
 Thumbs.db
+
+AGENTS.md
+opencode.md
+.opencode/
+.specify/
+specs/
+history/

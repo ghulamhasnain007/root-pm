@@ -12,5 +12,11 @@ docker exec project-kafka kafka-topics \
   --topic agent-bridge.meeting-events \
   --partitions 4 --replication-factor 1
 
+docker exec project-kafka kafka-topics \
+  --bootstrap-server localhost:9092 \
+  --create --if-not-exists \
+  --topic agent-bridge.config-events \
+  --partitions 4 --replication-factor 1
+
 echo "Topics:"
 docker exec project-kafka kafka-topics --bootstrap-server localhost:9092 --list

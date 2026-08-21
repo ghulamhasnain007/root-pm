@@ -198,6 +198,9 @@ export class MongoToolConfigRepository implements ToolConfigRepository {
   async findAllByOrg(orgId: string) {
     return (await ToolConfigModel.find({ orgId })).map(toToolConfig)
   }
+  async findAllByTool(toolId: string) {
+    return (await ToolConfigModel.find({ toolId })).map(toToolConfig)
+  }
   async delete(orgId: string, toolId: string) {
     await ToolConfigModel.deleteOne({ orgId, toolId })
   }

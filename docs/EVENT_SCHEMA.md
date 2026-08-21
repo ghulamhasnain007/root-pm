@@ -50,3 +50,41 @@ the resolved text channel id (plus the project key resolved from
 `channel_mappings`) explicitly into `save_meeting`, rather than the raw event
 field. An earlier version stored the raw voice channel id directly, which
 silently broke every subsequent meeting-context lookup for that channel.
+
+## tool-config.updated
+
+Published by auth-service when an org's tool configuration is created or updated.
+Consumed by scrum-master-ai (BotConnectionManager) and agent-bridge
+(DiscordPlatformManager) to establish or update per-org connections.
+
+Key: `toolId` (e.g. `discord`)
+
+```typescript
+{
+  schemaVersion: "1.0";
+  eventType: "tool-config.updated";
+  sourceSystem: "auth-service";
+  publishedAt: number;
+  toolId: string;        // "discord"
+  orgId: string;         // "acme-corp"
+  category: string;      // "integration"
+}
+```
+
+## tool-config.removed
+
+Published by auth-service when an org's tool configuration is deleted.
+Consumed by scrum-master-ai and agent-bridge to tear down the org's connection.
+
+Key: `toolId` (e.g. `discord`)
+
+```typescript
+{
+  schemaVersion: "1.0";
+  eventType: "tool-config.removed";
+  sourceSystem: "auth-service";
+  publishedAt: number;
+  toolId: string;
+  orgId: string;
+}
+```

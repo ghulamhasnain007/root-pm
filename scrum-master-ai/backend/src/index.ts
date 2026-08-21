@@ -3,6 +3,10 @@ import FastifyCors from '@fastify/cors';
 import FastifyRawBody from 'fastify-raw-body';
 import { config } from './config/index.js';
 import { setupIntegrations } from './integrations/index.js';
+import { BotConnectionManager } from './integrations/discord/BotConnectionManager.js';
+import { startConfigConsumer, onConfigEvent } from './kafka/consumer.js';
+import { registerToolConfigHandlers } from './kafka/consumers/ToolConfigConsumer.js';
+import registerStatusRoutes from './integrations/routes/status.js';
 
 const fastify = Fastify({
   logger: {
@@ -28,6 +32,33 @@ async function bootstrap() {
   });
 
   fastify.get('/health', async () => ({ status: 'ok', timestamp: Date.now() }));
+
+  // ── Multi-org bot connection manager ──────────────────────────────────
+  const connectionManager = new BotConnectionManager();
+
+  // Discover orgs and establish connections on startup
+  const authServiceUrl = process.env.AUTH_SERVICE_URL;
+  const internalKey = process.env.AUTH_SERVICE_INTERNAL_KEY;
+  if (authServiceUrl && internalKey) {
+    try {
+      await connectionManager.discoverAndConnect(authServiceUrl, internalKey);
+      console.log(`[scrum-master-ai] Bot connection manager: ${connectionManager.getStatus().length} org(s) connected`);
+    } catch (err) {
+      console.error('[scrum-master-ai] Failed to discover orgs from auth-service:', err);
+    }
+  } else {
+    console.warn('[scrum-master-ai] AUTH_SERVICE_URL not set — multi-org discovery disabled');
+  }
+
+  // Register config event handlers for live updates
+  if (process.env.KAFKA_BROKERS && authServiceUrl && internalKey) {
+    registerToolConfigHandlers(connectionManager, authServiceUrl, internalKey);
+    startConfigConsumer(process.env.KAFKA_BROKERS.split(',').map(b => b.trim()))
+      .catch(err => console.warn('[scrum-master-ai] Kafka config consumer failed:', err));
+  }
+
+  // Register status routes
+  registerStatusRoutes(fastify, { connectionManager });
 
   await setupIntegrations(fastify);
 

@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto'
 import { env } from './config.js'
 import { initKeys } from './crypto/jwt.js'
 import { ToolCredentialCipher } from './crypto/ToolCredentialCipher.js'
-import { NoopEventPublisher } from './services/ToolConfigEventPublisher.js'
+import { NoopEventPublisher, KafkaEventPublisher } from './services/ToolConfigEventPublisher.js'
+import type { ToolConfigEventPublisher } from './services/ToolConfigEventPublisher.js'
 import { buildApp } from './http/server.js'
 import { createMemoryRepositories } from './repositories/memory/index.js'
 import { connectMongo, createMongoRepositories } from './repositories/mongo/index.js'
@@ -78,12 +79,25 @@ async function main() {
     await seedDefaultOrg(repos, cipher, env)
   }
 
+  // Wire tool config event publisher — Kafka when brokers are available, noop otherwise
+  let toolConfigEvents: ToolConfigEventPublisher
+  const kafkaBrokers = env.KAFKA_BROKERS
+  if (kafkaBrokers) {
+    const publisher = new KafkaEventPublisher()
+    await publisher.connect(kafkaBrokers.split(',').map(b => b.trim()))
+    toolConfigEvents = publisher
+    console.log(`[auth-service] Kafka event publisher connected (${kafkaBrokers})`)
+  } else {
+    toolConfigEvents = new NoopEventPublisher()
+    console.warn('[auth-service] KAFKA_BROKERS not set — tool config events will NOT be published')
+  }
+
   const app = buildApp({
     repos,
     refreshTokens,
     email,
     cipher,
-    toolConfigEvents: new NoopEventPublisher(),
+    toolConfigEvents,
     internalServiceKey,
     clientBaseUrl: env.CLIENT_BASE_URL,
     accessTokenTtlSeconds: env.ACCESS_TOKEN_TTL_SECONDS,

@@ -1,15 +1,18 @@
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import { useConfig } from '../store/ConfigContext'
+import { useAuth } from '../store/AuthContext'
 
 const NAV = [
   // ── Agent-bridge (config dashboard) sections — unchanged ──
   { section: 'System', to: '/overview', label: 'Overview', icon: 'layout-dashboard' },
   { section: 'Setup', to: '/platforms', label: 'Platforms', icon: 'plug-connected' },
+  { section: 'Setup', to: '/tools', label: 'Tools', icon: 'wrench' },
   { section: 'Setup', to: '/channels', label: 'Channel map', icon: 'map-2' },
   { section: 'Setup', to: '/permissions', label: 'Permissions', icon: 'shield-half' },
   { section: 'Agent', to: '/llm', label: 'LLM & Models', icon: 'brain' },
   { section: 'Agent', to: '/advanced', label: 'Advanced', icon: 'adjustments-horizontal' },
   { section: 'System', to: '/logs', label: 'Activity log', icon: 'activity' },
+  { section: 'System', to: '/staff', label: 'Staff', icon: 'users' },
   // ── Voice bot section — new ──
   { section: 'Voice', to: '/voice/schedule', label: 'Schedule', icon: 'calendar-event' },
   { section: 'Voice', to: '/voice/ambient', label: 'Ambient', icon: 'microphone' },
@@ -36,11 +39,13 @@ const ITEM_FLAG: Record<string, string[]> = {
 const BREADCRUMB_MAP: Record<string, string> = {
   '/overview': 'Overview',
   '/platforms': 'Platforms',
+  '/tools': 'Tool Configuration',
   '/channels': 'Channel map',
   '/permissions': 'Permissions',
   '/llm': 'LLM & Models',
   '/advanced': 'Advanced',
   '/logs': 'Activity log',
+  '/staff': 'Staff',
   '/voice/schedule': 'Voice · Schedule',
   '/voice/ambient': 'Voice · Ambient',
   '/voice/integrations': 'Voice · Integrations',
@@ -48,7 +53,12 @@ const BREADCRUMB_MAP: Record<string, string> = {
 
 export default function Shell() {
   const { systemStatus, flags } = useConfig()
+  const { isAuthenticated, isLoading } = useAuth()
   const location = useLocation()
+
+  if (isLoading) return null
+  if (!isAuthenticated) return <Navigate to="/login" replace />
+
   const sm = STATUS_MAP[systemStatus]
   const isVoiceRoute = location.pathname.startsWith('/voice')
 

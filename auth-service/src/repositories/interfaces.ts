@@ -50,6 +50,7 @@ export interface ToolConfigRepository {
   upsert(orgId: string, category: ToolCategory, toolId: string, patch: { encryptedPayload: string; status: ToolStatus; configuredBy: string }): Promise<ToolConfig>
   findByOrgAndTool(orgId: string, toolId: string): Promise<ToolConfig | null>
   findAllByOrg(orgId: string): Promise<ToolConfig[]>
+  findAllByTool(toolId: string): Promise<ToolConfig[]>
   delete(orgId: string, toolId: string): Promise<void>
 }
 

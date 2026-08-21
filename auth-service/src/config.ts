@@ -65,6 +65,9 @@ const EnvSchema = z.object({
   EMAIL_FROM: z.string().default('Root-PM <no-reply@root-pm.local>'),
 
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
+
+  // Kafka — when set, tool-config events are published to agent-bridge.config-events
+  KAFKA_BROKERS: z.string().optional(),
 })
 
 export const env = EnvSchema.parse(process.env)
