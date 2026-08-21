@@ -154,6 +154,28 @@ def _build_memory_store(cfg: dict):
 async def main(config_path: str) -> None:
     cfg = load_config(config_path)
 
+    # ── Optional: overlay Discord/Taiga credentials from auth-service ───────
+    # Off by default (fully backward compatible with the existing
+    # env-var/config.json flow). Set AUTH_SERVICE_URL to opt in — see
+    # core/auth_service_client.py. This only overlays cfg before validation
+    # runs below; everything downstream of this block is unchanged.
+    auth_service_url = os.environ.get("AUTH_SERVICE_URL", "")
+    if auth_service_url:
+        from core.auth_service_client import AuthServiceClient, overlay_auth_service_credentials
+
+        internal_key = os.environ.get("AUTH_SERVICE_INTERNAL_KEY", "")
+        org_id = os.environ.get("ORG_ID", "default")
+        if not internal_key:
+            logger.error("AUTH_SERVICE_URL is set but AUTH_SERVICE_INTERNAL_KEY is missing — cannot fetch credentials.")
+            sys.exit(1)
+        cache_ttl = float(os.environ.get("AUTH_SERVICE_CACHE_TTL_SECONDS", "30"))
+        client = AuthServiceClient(auth_service_url, internal_key, cache_ttl)
+        try:
+            overlay_auth_service_credentials(cfg, org_id, client)
+        except RuntimeError as e:
+            logger.error("Failed to fetch credentials from auth-service: %s", e)
+            sys.exit(1)
+
     # ── Validate required keys ───────────────────────────────────────────────
     bot_token = cfg.get("discord", {}).get("bot_token", "")
     gemini_key = cfg.get("llm", {}).get("gemini_api_key", "")
