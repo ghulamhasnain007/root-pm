@@ -131,6 +131,9 @@ export class MemoryToolConfigRepository implements ToolConfigRepository {
   async findAllByOrg(orgId: string) {
     return [...this.byKey.values()].filter(t => t.orgId === orgId)
   }
+  async findAllByTool(toolId: string) {
+    return [...this.byKey.values()].filter(t => t.toolId === toolId)
+  }
   async delete(orgId: string, toolId: string) {
     this.byKey.delete(this.key(orgId, toolId))
   }

@@ -64,6 +64,21 @@ class AuthServiceClient:
         their own."""
         self._cache.pop((org_id, tool_id), None)
 
+    def list_orgs_for_tool(self, tool_id: str) -> list[dict[str, Any]]:
+        """List orgs that have a given tool configured — used by
+        DiscordPlatformManager at startup to discover which orgs to
+        connect. Not cached (called once at startup / on explicit
+        re-discovery, not a hot path like get_tool_credentials)."""
+        url = f"{self.base_url}/internal/tools/{tool_id}/orgs"
+        try:
+            resp = requests.get(url, headers={"X-Internal-Key": self.internal_service_key}, timeout=5)
+        except requests.RequestException as e:
+            raise RuntimeError(f"auth-service unreachable while listing orgs for tool {tool_id}: {e}") from e
+
+        if resp.status_code != 200:
+            raise RuntimeError(f"auth-service org listing failed: {resp.status_code} {resp.text[:200]}")
+        return resp.json().get("orgs", [])
+
 
 def overlay_auth_service_credentials(cfg: dict, org_id: str, client: AuthServiceClient) -> dict:
     """
@@ -80,8 +95,9 @@ def overlay_auth_service_credentials(cfg: dict, org_id: str, client: AuthService
     time rather than all-or-nothing.
     """
     discord_creds = client.get_tool_credentials(org_id, "discord")
-    if discord_creds and discord_creds.get("botToken"):
-        cfg.setdefault("discord", {})["bot_token"] = discord_creds["botToken"]
+    bot_token = discord_creds and (discord_creds.get("bot_token") or discord_creds.get("botToken"))
+    if bot_token:
+        cfg.setdefault("discord", {})["bot_token"] = bot_token
         logger.info("Discord bot token sourced from auth-service for org %s", org_id)
 
     taiga_creds = client.get_tool_credentials(org_id, "taiga")

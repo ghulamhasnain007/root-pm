@@ -76,19 +76,34 @@ export const authApi = {
     request('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
       .then((data: AuthTokens) => { saveTokens(data); return data; }),
 
-  register: (email: string, password: string, name: string, inviteToken: string) =>
-    request('/auth/register', { method: 'POST', body: JSON.stringify({ email, password, name, inviteToken }) })
-      .then((data: AuthTokens) => { saveTokens(data); return data; }),
+  /** Creates a brand-new org + pending-verification Owner account. This is
+   * the ONLY self-serve entry point in the system — there is no "join an
+   * existing org" registration; staff join via acceptInvite() only. Does
+   * NOT log the user in: the real endpoint returns no tokens (the account
+   * can't log in until verifyEmail() succeeds), unlike login()/acceptInvite(). */
+  register: (orgName: string, ownerEmail: string, ownerPassword: string, ownerName: string) =>
+    request('/orgs/register', {
+      method: 'POST',
+      body: JSON.stringify({ orgName, ownerEmail, ownerPassword, ownerName }),
+    }),
 
   logout: () =>
-    request('/auth/logout', { method: 'POST' }).finally(clearTokens),
+    request('/auth/logout', { method: 'POST', body: JSON.stringify({ refreshToken }) }).finally(clearTokens),
 
   verifyEmail: (token: string) =>
-    request('/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }),
+    request(`/auth/verify-email?token=${encodeURIComponent(token)}`),
 
-  acceptInvite: (token: string, email: string, password: string, name: string) =>
-    request('/auth/invites/accept', { method: 'POST', body: JSON.stringify({ token, email, password, name }) })
-      .then((data: AuthTokens) => { saveTokens(data); return data; }),
+  resendVerification: (email: string) =>
+    request('/auth/resend-verification', { method: 'POST', body: JSON.stringify({ email }) }),
+
+  /** Creates the invited staff account and returns it (no tokens — the real
+   * endpoint doesn't issue a session directly, since accepting an invite
+   * and logging in are different concerns). Chains an explicit login()
+   * using the email from the created account + the password just
+   * submitted, so the caller still ends up authenticated in one call. */
+  acceptInvite: (token: string, password: string, name: string) =>
+    request('/auth/accept-invite', { method: 'POST', body: JSON.stringify({ token, password, name }) })
+      .then((user: { email: string }) => authApi.login(user.email, password)),
 
   // ── Staff management ──────────────────────────────────────────────────
 
@@ -99,7 +114,7 @@ export const authApi = {
     request(`/orgs/${orgId}/staff/invite`, { method: 'POST', body: JSON.stringify({ email, role }) }),
 
   changeRole: (orgId: string, userId: string, role: string) =>
-    request(`/orgs/${orgId}/staff/${userId}/role`, { method: 'PUT', body: JSON.stringify({ role }) }),
+    request(`/orgs/${orgId}/staff/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
 
   removeStaff: (orgId: string, userId: string) =>
     request(`/orgs/${orgId}/staff/${userId}`, { method: 'DELETE' }),

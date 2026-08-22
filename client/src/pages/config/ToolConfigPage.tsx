@@ -10,23 +10,41 @@ import { PageHeader } from '../../components/ui/index';
 interface ToolConfig {
   toolId: string;
   category: string;
-  credentials: Record<string, string>;
-  configuredAt?: string;
+  /** GET /orgs/:orgId/tools deliberately never returns credentials, not
+   * even encrypted (see auth-service's ToolConfigService.listTools) — this
+   * is metadata only. There is no way to pre-fill an edit form with
+   * previously-saved secret values; the form starts empty and re-saving
+   * requires re-entering all fields, same as most "write-only credential"
+   * UIs (e.g. re-entering an API key to rotate it). */
+  status: 'connected' | 'error' | 'disconnected';
+  configuredBy: string;
+  updatedAt: string;
 }
 
 interface ConnectionStatus {
-  toolId: string;
-  connected: boolean;
-  lastChecked: string;
-  error?: string;
+  orgId: string;
+  status: 'connecting' | 'connected' | 'failed' | 'disconnecting';
+  lastError: string | null;
+  connectedAt: number | null;
 }
 
+const CATEGORY_BY_TOOL: Record<string, string> = {
+  discord: 'communication',
+  taiga: 'project_management',
+};
+
 const TOOL_DEFINITIONS = [
-  { id: 'discord', label: 'Discord', icon: 'brand-discord', color: '#5865F2', bg: 'rgba(88,101,242,.12)', fields: [
+  { id: 'discord', label: 'Discord', icon: 'brand-discord', color: '#5865F2', bg: 'rgba(88,101,242,.12)',
+    /** Only Discord has a live connection concept in this system (an actual
+     * gateway socket, managed by BotConnectionManager) — Taiga credentials
+     * are either valid or not, with no persistent "connection" to show a
+     * live status for, so the status indicator only ever renders here. */
+    showsLiveStatus: true,
+    fields: [
     { key: 'bot_token', label: 'Bot token', type: 'password', placeholder: 'MTxxxx.xxxxx.xxxxxxxxxx', hint: 'Discord Developer Portal > Bot > Token' },
     { key: 'trigger_role', label: 'Trigger role', type: 'text', placeholder: 'FYP', hint: 'Role name that activates the bot' },
   ]},
-  { id: 'taiga', label: 'Taiga', icon: 'leaf', color: '#10B981', bg: 'rgba(16,185,129,.12)', fields: [
+  { id: 'taiga', label: 'Taiga', icon: 'leaf', color: '#10B981', bg: 'rgba(16,185,129,.12)', showsLiveStatus: false, fields: [
     { key: 'url', label: 'Instance URL', type: 'url', placeholder: 'https://taiga.example.com/api/v1', hint: 'Taiga REST API base URL' },
     { key: 'username', label: 'Username', type: 'text', placeholder: 'bot_user' },
     { key: 'password', label: 'Password', type: 'password', placeholder: '••••••••' },
@@ -38,7 +56,7 @@ export default function ToolConfigPage() {
   const isAdmin = user?.role === 'owner' || user?.role === 'admin';
 
   const [configs, setConfigs] = useState<ToolConfig[]>([]);
-  const [statuses, setStatuses] = useState<ConnectionStatus[]>([]);
+  const [orgStatus, setOrgStatus] = useState<ConnectionStatus | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -47,8 +65,10 @@ export default function ToolConfigPage() {
   const loadConfigs = useCallback(async () => {
     if (!user?.orgId) return;
     try {
+      // GET /orgs/:orgId/tools returns a raw array directly, not wrapped
+      // in { tools: [...] } — see auth-service's registerToolRoutes.
       const data = await authApi.listTools(user.orgId);
-      setConfigs(data?.tools || []);
+      setConfigs(Array.isArray(data) ? data : []);
     } catch { /* ignore */ }
     setLoading(false);
   }, [user?.orgId]);
@@ -56,12 +76,20 @@ export default function ToolConfigPage() {
   const loadStatuses = useCallback(async () => {
     if (!user?.orgId) return;
     try {
-      const resp = await fetch(`http://localhost:3001/integrations/status`, {
+      // Relative path — proxied to the voice-bot backend by vite.config.ts
+      // (dev) / nginx.conf (prod), same convention as every other call to
+      // that backend in this app. A hardcoded absolute localhost URL would
+      // only ever work when the client happens to be running literally
+      // colocated with that exact port, breaking in Docker/production.
+      const resp = await fetch('/integrations/status', {
         headers: { 'Authorization': `Bearer ${authApi.getAccessToken()}` },
       });
       if (resp.ok) {
         const data = await resp.json();
-        setStatuses(data?.connections || []);
+        const connections: ConnectionStatus[] = data?.connections || [];
+        // BotConnectionManager's status is per-ORG (one Discord connection
+        // per org), not per-tool — find this org's single entry, if any.
+        setOrgStatus(connections.find(c => c.orgId === user.orgId) || null);
       }
     } catch { /* ignore */ }
   }, [user?.orgId]);
@@ -75,16 +103,16 @@ export default function ToolConfigPage() {
   }, [loadStatuses]);
 
   const startEdit = (toolId: string) => {
-    const existing = configs.find(c => c.toolId === toolId);
     setEditing(toolId);
-    setCredentials(existing?.credentials || {});
+    setCredentials({}); // always starts empty — see ToolConfig's comment above
   };
 
   const handleSave = async () => {
     if (!user?.orgId || !editing) return;
     setSaving(true);
     try {
-      await authApi.setTool(user.orgId, editing, TOOL_DEFINITIONS.find(t => t.id === editing)?.category || 'integration', credentials);
+      const category = CATEGORY_BY_TOOL[editing];
+      await authApi.setTool(user.orgId, editing, category, credentials);
       await loadConfigs();
       await loadStatuses();
       setEditing(null);
@@ -106,8 +134,6 @@ export default function ToolConfigPage() {
     }
   };
 
-  const getStatus = (toolId: string) => statuses.find(s => s.toolId === toolId);
-
   if (loading) return <p style={{ color: 'var(--t-mid)', fontSize: 14 }}>Loading tools...</p>;
 
   return (
@@ -120,7 +146,6 @@ export default function ToolConfigPage() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {TOOL_DEFINITIONS.map(tool => {
           const config = configs.find(c => c.toolId === tool.id);
-          const status = getStatus(tool.id);
           const isEditing = editing === tool.id;
 
           return (
@@ -146,14 +171,17 @@ export default function ToolConfigPage() {
                   </div>
                 </div>
 
-                {/* Status indicator */}
-                {status && (
+                {/* Live connection status — Discord only, see showsLiveStatus comment above */}
+                {tool.showsLiveStatus && orgStatus && (
                   <span style={{
                     display: 'flex', alignItems: 'center', gap: 6, fontSize: 12,
-                    color: status.connected ? 'var(--c-green)' : 'var(--c-red)',
+                    color: orgStatus.status === 'connected' ? 'var(--c-green)' : orgStatus.status === 'connecting' ? 'var(--c-amber)' : 'var(--c-red)',
                   }}>
                     <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor' }} />
-                    {status.connected ? 'Connected' : 'Disconnected'}
+                    {orgStatus.status === 'connected' ? 'Connected'
+                      : orgStatus.status === 'connecting' ? 'Connecting…'
+                      : orgStatus.status === 'disconnecting' ? 'Disconnecting…'
+                      : `Failed${orgStatus.lastError ? `: ${orgStatus.lastError}` : ''}`}
                   </span>
                 )}
 
@@ -181,6 +209,11 @@ export default function ToolConfigPage() {
               {/* Edit form */}
               {isEditing && (
                 <div style={{ padding: 20 }}>
+                  {config && (
+                    <p style={{ fontSize: 12, color: 'var(--t-lo)', marginBottom: 16, lineHeight: 1.5 }}>
+                      Credentials are write-only and can't be displayed here — re-enter all fields to update them.
+                    </p>
+                  )}
                   {tool.fields.map(field => (
                     <label key={field.key} style={{ display: 'block', marginBottom: 16 }}>
                       <span style={{ fontSize: 12, color: 'var(--t-mid)', marginBottom: 4, display: 'block' }}>

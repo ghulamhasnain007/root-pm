@@ -35,6 +35,26 @@ export async function getDiscordClient(botToken: string): Promise<Client> {
   return client;
 }
 
+/**
+ * Explicitly disconnect and drop a cached client — used when an org's
+ * Discord connection is being torn down (tool removed, org deprovisioned).
+ * Without this, removing an org from BotConnectionManager only forgets
+ * about the client on this app's side while the actual Discord gateway
+ * connection keeps running in the background indefinitely — a resource
+ * leak, and it means a removed org's bot stays live on Discord even after
+ * being "removed" from the dashboard.
+ */
+export async function releaseDiscordClient(botToken: string): Promise<void> {
+  const client = clients.get(botToken);
+  if (!client) return;
+  clients.delete(botToken);
+  try {
+    await client.destroy();
+  } catch {
+    // best-effort — the client is being discarded either way
+  }
+}
+
 export interface GuildVoiceChannels {
   guildId: string;
   guildName: string;

@@ -2,7 +2,7 @@
  * kafka/producer.ts — Kafka producer wrapper for auth-service.
  * Publishes tool-config events when org credentials change.
  */
-import { Kafka, type Producer } from 'kafka-js';
+import { Kafka, type Producer } from 'kafkajs';
 
 let producer: Producer | null = null;
 let connected = false;

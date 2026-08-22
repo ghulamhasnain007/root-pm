@@ -3,14 +3,14 @@
  */
 import { useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { authApi } from '../../lib/authApi';
+import { useAuth } from '../../store/AuthContext';
 
 export default function AcceptInvitePage() {
   const navigate = useNavigate();
+  const { acceptInvite } = useAuth();
   const [searchParams] = useSearchParams();
   const inviteToken = searchParams.get('token') || '';
 
-  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState('');
@@ -21,7 +21,13 @@ export default function AcceptInvitePage() {
     setError('');
     setLoading(true);
     try {
-      await authApi.acceptInvite(inviteToken, email, password, name);
+      // No email field here on purpose — the invite is already tied to a
+      // specific email server-side (set when the invite was created);
+      // asking the invitee to retype it adds a field that could mismatch
+      // for no benefit. Goes through AuthContext (not authApi directly) so
+      // React's `user` state updates immediately — see AuthContext's
+      // acceptInvite for why that distinction matters here.
+      await acceptInvite(inviteToken, password, name);
       navigate('/overview');
     } catch (err: any) {
       setError(err.message || 'Failed to accept invite');
@@ -52,15 +58,9 @@ export default function AcceptInvitePage() {
             style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--c-border2)', background: 'var(--c-base)', color: 'var(--t-hi)', fontSize: 14 }} />
         </label>
 
-        <label style={{ display: 'block', marginBottom: 16 }}>
-          <span style={{ fontSize: 12, color: 'var(--t-mid)', marginBottom: 4, display: 'block' }}>Email</span>
-          <input type="email" value={email} onChange={e => setEmail(e.target.value)} required
-            style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--c-border2)', background: 'var(--c-base)', color: 'var(--t-hi)', fontSize: 14 }} />
-        </label>
-
         <label style={{ display: 'block', marginBottom: 24 }}>
           <span style={{ fontSize: 12, color: 'var(--t-mid)', marginBottom: 4, display: 'block' }}>Password</span>
-          <input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={8}
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={10}
             style={{ width: '100%', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--c-border2)', background: 'var(--c-base)', color: 'var(--t-hi)', fontSize: 14 }} />
         </label>
 

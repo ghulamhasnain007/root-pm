@@ -57,6 +57,12 @@ function OAuthCallbackRedirect() {
   return null
 }
 
+// NOTE: route-level auth guarding lives inside <Shell> itself (it checks
+// useAuth().isAuthenticated and redirects to /login), not here — kept in
+// one place rather than duplicating the same check at both the route
+// definition and inside Shell, which would only invite the two checks
+// drifting out of sync.
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ToastProvider>

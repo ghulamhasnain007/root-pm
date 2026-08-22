@@ -26,6 +26,17 @@ class DiscordPlatform(CommunicationPlatform):
         self._config: dict[str, Any] = {}
         self._client: discord.Client | None = None
         self._message_callback = None
+        self._ready_callback = None
+
+    def set_ready_callback(self, callback) -> None:
+        """Optional hook invoked once the Discord gateway connection is
+        actually established (on_ready fires) — not when start() is called,
+        since start() blocks for the connection's entire lifetime and only
+        returns on disconnect. Used by DiscordPlatformManager to know when
+        it's accurate to report an org's connection as 'connected' rather
+        than inferring it from start() returning (which would mean the
+        status only ever flips at the very end, on disconnect)."""
+        self._ready_callback = callback
 
     def configure(self, config: dict[str, Any]) -> None:
         self._config = config
@@ -87,6 +98,8 @@ class DiscordPlatform(CommunicationPlatform):
     async def on_ready(self) -> None:
         logger.info("Discord bot online as %s (id=%s)", self._client.user, self._client.user.id)
         print(f"[Agent Bridge] Discord bot ready: {self._client.user} (id={self._client.user.id})")
+        if self._ready_callback:
+            self._ready_callback()
 
     async def on_message(self, message: discord.Message) -> None:
         logger.info(

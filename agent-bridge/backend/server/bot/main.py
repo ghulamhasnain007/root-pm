@@ -38,6 +38,7 @@ import platforms.pm.linear_platform              # noqa: F401
 
 from core.registry import PlatformRegistry
 from agent.agent import AgentBridge, DualMemoryStore, ChannelMemoryStore
+from core.auth_service_client import AuthServiceClient
 from platforms.communication.discord_platform_manager import DiscordPlatformManager
 from core.config_events import build_config_consumer_from_env
 from core.tool_config_consumer import setup_config_consumer
@@ -231,34 +232,6 @@ async def main(config_path: str) -> None:
         "role_permissions": role_perms,
     })
 
-    # ── Multi-org Discord connection manager ─────────────────────────────
-    discord_manager = DiscordPlatformManager()
-    discord_manager.set_message_callback(None)  # Will be set after bridge is built
-
-    auth_service_url = os.environ.get("AUTH_SERVICE_URL", "")
-    internal_key = os.environ.get("AUTH_SERVICE_INTERNAL_KEY", "")
-    if auth_service_url and internal_key:
-        try:
-            await discord_manager.discover_and_connect(
-                auth_service_url, internal_key,
-                {"trigger_role": cfg.get("discord", {}).get("trigger_role", "FYP"),
-                 "channel_map": channel_map,
-                 "role_permissions": role_perms},
-            )
-            logger.info("DiscordPlatformManager: %d org(s) connected", len(discord_manager.get_status()))
-        except Exception as e:
-            logger.warning("DiscordPlatformManager discovery failed: %s", e)
-    else:
-        logger.info("AUTH_SERVICE_URL not set — multi-org discovery disabled, using single-org fallback")
-
-    # Wire config event consumer for live updates
-    if os.environ.get("KAFKA_BROKERS") and auth_service_url and internal_key:
-        config_consumer = build_config_consumer_from_env()
-        if config_consumer:
-            setup_config_consumer(config_consumer, discord_manager, auth_service_url, internal_key)
-            config_consumer.start()
-            logger.info("Config event consumer started")
-
     # ── Instantiate PM platform ──────────────────────────────────────────────
     pm_id = cfg.get("pm_platform", "taiga")
     PMClass = PlatformRegistry.get_pm(pm_id)
@@ -286,8 +259,58 @@ async def main(config_path: str) -> None:
         memory_store       = memory_store,
     )
 
-    # ── Wire the message callback ────────────────────────────────────────────
+    # ── Wire the message callback (single-org legacy path) ──────────────────
     comm.set_message_callback(bridge.handle)
+
+    # ── Multi-org Discord connection manager ─────────────────────────────
+    # IMPORTANT: set_message_callback(bridge.handle) MUST happen before
+    # discover_and_connect()/setup_config_consumer() — DiscordPlatformManager
+    # only applies the callback to orgs connected AFTER it's set (see
+    # DiscordPlatformManager.set_message_callback's docstring). An earlier
+    # version of this wiring built the manager and started connecting orgs
+    # before `bridge` even existed, which meant every multi-org connection
+    # ran with no message callback at all — bots would join Discord and
+    # receive messages but never respond to any of them.
+    auth_service_url = os.environ.get("AUTH_SERVICE_URL", "")
+    internal_key = os.environ.get("AUTH_SERVICE_INTERNAL_KEY", "")
+    if auth_service_url and internal_key:
+        cache_ttl = float(os.environ.get("AUTH_SERVICE_CACHE_TTL_SECONDS", "30"))
+        auth_client = AuthServiceClient(auth_service_url, internal_key, cache_ttl)
+
+        # Status is mirrored to Redis so the (separate-process) FastAPI
+        # config API can read it back — see routers/discord_connections.py.
+        # Best-effort: if Redis isn't reachable, the manager still works
+        # fine, it just has no cross-process status visibility.
+        status_redis = None
+        redis_url = os.environ.get("REDIS_URL", cfg.get("redis", {}).get("url", ""))
+        if redis_url:
+            try:
+                import redis
+                status_redis = redis.Redis.from_url(redis_url, decode_responses=True)
+                status_redis.ping()
+            except Exception as e:
+                logger.warning("Discord connection status Redis unavailable (%s) — status won't be visible via the API", e)
+                status_redis = None
+
+        discord_manager = DiscordPlatformManager(auth_client, status_redis=status_redis)
+        discord_manager.set_message_callback(bridge.handle)
+
+        try:
+            await discord_manager.discover_and_connect()
+            logger.info("DiscordPlatformManager: %d org(s) connected", len(discord_manager.get_status()))
+        except Exception as e:
+            logger.warning("DiscordPlatformManager discovery failed: %s", e)
+
+        # Wire config event consumer for live add/remove updates
+        if os.environ.get("KAFKA_BROKERS"):
+            config_consumer = build_config_consumer_from_env()
+            if config_consumer:
+                setup_config_consumer(config_consumer, discord_manager, asyncio.get_running_loop())
+                config_consumer.start()
+                logger.info("Config event consumer started")
+    else:
+        discord_manager = None
+        logger.info("AUTH_SERVICE_URL not set — multi-org discovery disabled, using single-org fallback")
 
     # ── Kafka bridge (voice bot → Taiga sync + meeting memory) ──────────────
     # Runs the python-consumer in-process so it shares bridge._memory: meeting

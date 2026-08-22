@@ -56,15 +56,15 @@ export function registerToolRoutes(app: FastifyInstance, deps: { toolConfigServi
 
   // ── Internal: list orgs that have a given tool configured ───────────────
   // Used by bot managers at startup to discover which orgs to connect.
+  // Returns 200 + [] when nothing is configured, not 404 — this is a list
+  // endpoint, and "no results" isn't an error condition, consistent with
+  // every other list endpoint in this service (GET /orgs/:orgId/tools,
+  // GET /orgs/:orgId/invites, etc. all return an empty array, not a 404).
   app.get('/internal/tools/:toolId/orgs', {
     preHandler: requireInternalKey(internalServiceKey),
-  }, async (request, reply) => {
+  }, async (request) => {
     const { toolId } = request.params as { toolId: string }
-    const configs = await toolConfigService.listOrgsForTool(toolId)
-    if (configs.length === 0) {
-      reply.code(404)
-      return { code: 'NOT_FOUND', message: 'No orgs have this tool configured' }
-    }
-    return { orgs: configs }
+    const orgs = await toolConfigService.listOrgsForTool(toolId)
+    return { orgs }
   })
 }

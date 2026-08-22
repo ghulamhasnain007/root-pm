@@ -9,11 +9,13 @@
  * Subscribes to Kafka tool-config events to add/remove connections dynamically.
  */
 import { Client } from 'discord.js';
-import { getDiscordClient } from './DiscordBotClient.js';
+import { getDiscordClient, releaseDiscordClient } from './DiscordBotClient.js';
 
 export interface OrgConnection {
   orgId: string;
   client: Client;
+  /** Needed at removal time to release the right cached client — see releaseDiscordClient. */
+  token: string;
   status: 'connecting' | 'connected' | 'failed' | 'disconnecting';
   lastError: string | null;
   connectedAt: Date | null;
@@ -35,37 +37,39 @@ export class BotConnectionManager {
 
   /**
    * Add a connection for a specific org.
+   *
+   * Deliberately does NOT fall back to a shared env-var bot token if the
+   * auth-service credential fetch fails for any reason. This is a
+   * bring-your-own-bot-per-org design — a shared fallback would mean that
+   * if auth-service is briefly unreachable, every org being (re)connected
+   * during that window would silently share ONE bot token. Beyond the
+   * obvious tenant-isolation problem, Discord only allows a single active
+   * gateway session per bot token — multiple orgs' connections fighting
+   * over the same token would repeatedly kick each other's sessions.
+   * Failing this org's connection cleanly (status: 'failed', logged, does
+   * not affect any other org) is the correct behavior here, not silently
+   * degrading into a shared identity.
    */
   async addOrg(orgId: string, authServiceUrl: string, internalKey: string): Promise<void> {
     if (this.connections.has(orgId)) return;
 
-    const conn: OrgConnection = {
-      orgId,
-      client: null as any,
-      status: 'connecting',
-      lastError: null,
-      connectedAt: null,
-    };
-    this.connections.set(orgId, conn);
-
     try {
-      let credentials: Record<string, string> = {};
-      try {
-        credentials = await this.fetchCredentials(authServiceUrl, internalKey, orgId, 'discord');
-      } catch {
-        // Fallback to env vars — deprecated, will be removed in future release
-        const envToken = process.env.DISCORD_BOT_TOKEN || process.env.BOT_TOKEN || '';
-        if (envToken) {
-          console.warn(`[BotConnectionManager] DEPRECATED: Using env-var fallback for org ${orgId}. ` +
-            'Migrate to auth-service tool config: npx tsx scripts/migrate-to-org.ts');
-          credentials = {
-            bot_token: envToken,
-            trigger_role: process.env.DISCORD_TRIGGER_ROLE || 'FYP',
-          };
-        }
-      }
-      const token = credentials.bot_token || credentials.token;
-      if (!token) throw new Error('No bot token found in credentials');
+      const credentials = await this.fetchCredentials(authServiceUrl, internalKey, orgId, 'discord');
+      // Checks both naming conventions — the dashboard's ToolConfigPage
+      // writes bot_token (snake_case, matching this codebase's existing
+      // config field naming), but check camelCase too for resilience
+      // against whatever wrote the credentials, same defensive dual-check
+      // core/auth_service_client.py's overlay function does on the Python
+      // side (they must agree on what they'll accept, or a credential
+      // written by one path silently fails to be read by the other).
+      const token = credentials.bot_token || credentials.botToken || credentials.token;
+      if (!token) throw new Error('No bot token configured for this org\'s Discord tool');
+
+      const conn: OrgConnection = {
+        orgId, token, client: null as any,
+        status: 'connecting', lastError: null, connectedAt: null,
+      };
+      this.connections.set(orgId, conn);
 
       const client = await getDiscordClient(token);
       conn.client = client;
@@ -75,22 +79,29 @@ export class BotConnectionManager {
 
       console.log(`[BotConnectionManager] Org ${orgId}: connected`);
     } catch (err: any) {
-      conn.status = 'failed';
-      conn.lastError = err.message;
+      this.connections.set(orgId, {
+        orgId, token: '', client: null as any,
+        status: 'failed', lastError: err.message, connectedAt: null,
+      });
       console.error(`[BotConnectionManager] Org ${orgId}: connection failed — ${err.message}`);
     }
   }
 
   /**
-   * Remove a connection for a specific org.
+   * Remove a connection for a specific org — actually disconnects from
+   * Discord (releaseDiscordClient), not just forgetting about it locally.
    */
   async removeOrg(orgId: string): Promise<void> {
     const conn = this.connections.get(orgId);
     if (!conn) return;
 
     conn.status = 'disconnecting';
-    this.clientToOrg.delete(conn.client);
+    if (conn.client) this.clientToOrg.delete(conn.client);
     this.connections.delete(orgId);
+
+    if (conn.token) {
+      await releaseDiscordClient(conn.token);
+    }
     console.log(`[BotConnectionManager] Org ${orgId}: connection removed`);
   }
 
@@ -128,7 +139,6 @@ export class BotConnectionManager {
     const data = await resp.json() as any;
     return data.orgs ?? [];
   }
-
   private async fetchCredentials(url: string, key: string, orgId: string, toolId: string): Promise<Record<string, string>> {
     const resp = await fetch(`${url}/internal/orgs/${orgId}/tools/${toolId}/credentials`, {
       headers: { 'X-Internal-Key': key },
