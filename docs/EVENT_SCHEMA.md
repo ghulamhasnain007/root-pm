@@ -57,7 +57,9 @@ Published by auth-service when an org's tool configuration is created or updated
 Consumed by scrum-master-ai (BotConnectionManager) and agent-bridge
 (DiscordPlatformManager) to establish or update per-org connections.
 
-Key: `toolId` (e.g. `discord`)
+Key: `orgId` (not `toolId` — partitioning by org keeps all of one org's
+events in order relative to each other, which matters more than ordering
+across orgs for the same tool).
 
 ```typescript
 {
@@ -66,17 +68,22 @@ Key: `toolId` (e.g. `discord`)
   sourceSystem: "auth-service";
   publishedAt: number;
   toolId: string;        // "discord"
-  orgId: string;         // "acme-corp"
-  category: string;      // "integration"
+  orgId: string;         // org id (uuid), not a slug
 }
 ```
+
+Note: `category` (`communication` | `project_management` | `meeting_provider`)
+is stored in auth-service's `tool_configs` collection but is NOT included in
+this event payload — consumers that need it look it up via
+`GET /internal/orgs/:orgId/tools/:toolId/credentials` or already know it
+implicitly (e.g. DiscordPlatformManager only ever handles `toolId: "discord"`).
 
 ## tool-config.removed
 
 Published by auth-service when an org's tool configuration is deleted.
 Consumed by scrum-master-ai and agent-bridge to tear down the org's connection.
 
-Key: `toolId` (e.g. `discord`)
+Key: `orgId` (same reasoning as tool-config.updated above).
 
 ```typescript
 {

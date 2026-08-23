@@ -7,10 +7,13 @@ import { useAuth } from '../../store/AuthContext';
 import { authApi } from '../../lib/authApi';
 
 interface StaffMember {
-  userId: string;
+  // Matches auth-service's publicUser() shape exactly — see the same note
+  // in StaffListPage.tsx. No userId field exists on the real response.
+  id: string;
   email: string;
   name: string;
   role: string;
+  status: string;
 }
 
 const ROLE_OPTIONS = ['member', 'admin', 'owner'];
@@ -34,8 +37,11 @@ export default function StaffDetailPage() {
   useEffect(() => {
     if (!currentUser?.orgId || !userId) return;
     authApi.listStaff(currentUser.orgId)
+      // GET /orgs/:orgId/staff returns a raw array directly, not wrapped
+      // in { staff: [...] } — same bug that was in StaffListPage.tsx.
       .then(data => {
-        const found = (data?.staff || []).find((s: StaffMember) => s.userId === userId);
+        const list: StaffMember[] = Array.isArray(data) ? data : [];
+        const found = list.find((s: StaffMember) => s.id === userId);
         if (found) {
           setMember(found);
           setNewRole(found.role);

@@ -7,11 +7,16 @@ import { useAuth } from '../../store/AuthContext';
 import { authApi } from '../../lib/authApi';
 
 interface StaffMember {
-  userId: string;
+  // auth-service's publicUser() returns {id, email, name, role, status} —
+  // no userId, no joinedAt. An earlier version of this interface didn't
+  // match that shape at all: every row's React key and its link to
+  // /staff/:id were built from s.userId, which was always undefined,
+  // meaning every row linked to the literal URL /staff/undefined.
+  id: string;
   email: string;
   name: string;
   role: string;
-  joinedAt: string;
+  status: string;
 }
 
 const ROLE_LABELS: Record<string, string> = { owner: 'Owner', admin: 'Admin', member: 'Member' };
@@ -28,7 +33,9 @@ export default function StaffListPage() {
   useEffect(() => {
     if (!user?.orgId) return;
     authApi.listStaff(user.orgId)
-      .then(data => setStaff(data?.staff || []))
+      // GET /orgs/:orgId/staff returns a raw array directly, not wrapped
+      // in { staff: [...] } — see auth-service's registerStaffRoutes.
+      .then(data => setStaff(Array.isArray(data) ? data : []))
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
   }, [user?.orgId]);
@@ -63,13 +70,12 @@ export default function StaffListPage() {
                 <th style={{ textAlign: 'left', padding: '10px 16px', fontWeight: 500, color: 'var(--t-mid)' }}>Name</th>
                 <th style={{ textAlign: 'left', padding: '10px 16px', fontWeight: 500, color: 'var(--t-mid)' }}>Email</th>
                 <th style={{ textAlign: 'left', padding: '10px 16px', fontWeight: 500, color: 'var(--t-mid)' }}>Role</th>
-                <th style={{ textAlign: 'left', padding: '10px 16px', fontWeight: 500, color: 'var(--t-mid)' }}>Joined</th>
                 <th style={{ width: 40 }} />
               </tr>
             </thead>
             <tbody>
               {staff.map(s => (
-                <tr key={s.userId} style={{ borderBottom: '1px solid var(--c-border)' }}>
+                <tr key={s.id} style={{ borderBottom: '1px solid var(--c-border)' }}>
                   <td style={{ padding: '10px 16px' }}>{s.name || '—'}</td>
                   <td style={{ padding: '10px 16px', color: 'var(--t-mid)' }}>{s.email}</td>
                   <td style={{ padding: '10px 16px' }}>
@@ -82,11 +88,8 @@ export default function StaffListPage() {
                       {ROLE_LABELS[s.role] || s.role}
                     </span>
                   </td>
-                  <td style={{ padding: '10px 16px', color: 'var(--t-lo)' }}>
-                    {s.joinedAt ? new Date(s.joinedAt).toLocaleDateString() : '—'}
-                  </td>
                   <td style={{ padding: '10px 8px' }}>
-                    <Link to={`/staff/${s.userId}`} style={{ color: 'var(--t-lo)', textDecoration: 'none', fontSize: 13 }}>
+                    <Link to={`/staff/${s.id}`} style={{ color: 'var(--t-lo)', textDecoration: 'none', fontSize: 13 }}>
                       <i className="ti ti-chevron-right" />
                     </Link>
                   </td>

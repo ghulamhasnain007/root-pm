@@ -86,7 +86,9 @@ async function main() {
     const publisher = new KafkaEventPublisher()
     await publisher.connect(kafkaBrokers.split(',').map(b => b.trim()))
     toolConfigEvents = publisher
-    console.log(`[auth-service] Kafka event publisher connected (${kafkaBrokers})`)
+    // No success/failure log here — connect() logs its own outcome (it
+    // never throws, by design, so this call site can't tell success from
+    // failure just from whether the await resolved).
   } else {
     toolConfigEvents = new NoopEventPublisher()
     console.warn('[auth-service] KAFKA_BROKERS not set — tool config events will NOT be published')

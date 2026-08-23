@@ -121,4 +121,4 @@ merges results by meeting.
 |---|---|---|
 | `agent-bridge.task-events` | `orgId:channelId` | task.created, task.closed, task.updated |
 | `agent-bridge.meeting-events` | `orgId:channelId` | meeting.started, meeting.transcript, meeting.ended |
-| `agent-bridge.config-events` | `toolId` | tool-config.updated, tool-config.removed |
+| `agent-bridge.config-events` | `orgId` | tool-config.updated, tool-config.removed |
