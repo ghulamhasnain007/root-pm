@@ -181,12 +181,22 @@ services:
       CORS_ORIGIN: http://localhost:5173
       AUTH_JWT_PRIVATE_KEY: ${AUTH_JWT_PRIVATE_KEY:-}
       AUTH_JWT_PUBLIC_KEY: ${AUTH_JWT_PUBLIC_KEY:-}
+      INTERNAL_SERVICE_KEY: rmlBm5sdXh4QQX6vyW7RMLxX/BsW48zqWC+Ca1jhCsQ=
+      TOOL_CREDENTIAL_ENCRYPTION_KEY: 9vFm+qUooEIcD2hf59EAuzX9K5XncSvTlXT735ikcr8=
       EMAIL_PROVIDER: ${AUTH_EMAIL_PROVIDER:-console}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
       EMAIL_FROM: ${EMAIL_FROM:-Root-PM <no-reply@root-pm.local>}
+      SEED_DEFAULT_ORG: "true"
+      SEED_ADMIN_EMAIL: ghasnain668@gmail.com
+      SEED_ADMIN_PASSWORD: Wahaj@1234
+      SEED_ADMIN_NAME: Admin
+      SEED_ORG_NAME: Default Organization
+      SEED_TAIGA_URL: http://api.taiga.io/api/v1
+      SEED_TAIGA_USER: ghasnain668@gmail.com
+      SEED_TAIGA_PASS: Wahaj@1234
     ports:
       - "4000:4000"
     depends_on:
