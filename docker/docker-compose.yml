@@ -108,9 +108,7 @@ services:
       # INTERNAL_SERVICE_KEY exactly — both come from the root .env
       # (env_file above), not hardcoded here.
       AUTH_SERVICE_URL: http://auth-service:4000
-      AUTH_SERVICE_INTERNAL_KEY: ${AUTH_SERVICE_INTERNAL_KEY:-}
       AMBIENT_BOOTSTRAP_ORG_ID: ${AMBIENT_BOOTSTRAP_ORG_ID:-default}
-      CREDENTIALS_STORE_DRIVER: ${CREDENTIALS_STORE_DRIVER:-}
     ports:
       - "3001:3001"
     depends_on:
