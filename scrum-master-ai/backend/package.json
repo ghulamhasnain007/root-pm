@@ -16,6 +16,7 @@
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "fastify-raw-body": "^4.3.0",
+    "jose": "^5.9.6",
     "kafka": "^0.2.3",
     "kafkajs": "^2.2.4",
     "libsodium-wrappers": "^0.8.4",

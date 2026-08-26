@@ -142,13 +142,24 @@ export async function setupIntegrations(fastify: FastifyInstance): Promise<void>
     // ── Ambient assistant (Feature 2) — additive, independent of scheduling
   // and on-demand standups above. See AMBIENT_BOT_ARCHITECTURE_PLAN.md.
   // Mongo-only for now, same simplification already made for scheduling.
+  //
+  // AMBIENT_BOOTSTRAP_ORG_ID: setupAmbientAssistant() wires up exactly ONE
+  // ambient assistant instance at boot, bound to one Discord client (see
+  // its doc comment) — there is no per-request context here to derive an
+  // org from, since nothing has made a request yet. Defaults to 'default'
+  // for a single-tenant deployment; set this explicitly to run the ambient
+  // assistant for a specific org in a multi-org deployment. True per-org
+  // ambient assistants (one instance per org, each with that org's own
+  // Discord client from BotConnectionManager) is a larger structural
+  // change, not attempted here — see setupAmbient.ts's doc comment.
   if (process.env.MONGODB_URI) {
-    const discordCreds = await credentialsStore.get('default', 'discord'); // 'default' — same single-org convention used throughout this module
+    const ambientOrgId = process.env.AMBIENT_BOOTSTRAP_ORG_ID || 'default';
+    const discordCreds = await credentialsStore.get(ambientOrgId, 'discord');
     if (discordCreds?.botToken) {
       const discordClient = await getDiscordClient(discordCreds.botToken);
-      await setupAmbientAssistant(fastify, { discordClient });
+      await setupAmbientAssistant(fastify, { discordClient, orgId: ambientOrgId });
     } else {
-      fastify.log.warn('[integrations] Discord not configured yet — ambient assistant disabled until credentials are added');
+      fastify.log.warn(`[integrations] Discord not configured for org "${ambientOrgId}" yet — ambient assistant disabled until credentials are added`);
     }
   }
 

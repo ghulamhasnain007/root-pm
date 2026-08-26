@@ -1,10 +1,8 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AmbientChannelStore } from '../AmbientChannelStore.js';
 import type { AmbientPresenceManager } from '../AmbientPresenceManager.js';
 import type { AmbientChannelInput } from '../types.js';
-
-// Matches the single-org simplification used throughout the integrations module.
-const ORG_ID = 'default';
+import { requireAuth } from '../../../../auth/requireAuth.js';
 
 function validate(body: Partial<AmbientChannelInput>): string[] {
   const missing: string[] = [];
@@ -19,14 +17,16 @@ export default function registerAmbientChannelRoutes(
 ): void {
   const { store, presence } = deps;
 
-  fastify.get('/integrations/ambient/channels', async () => store.list(ORG_ID));
+  fastify.get('/integrations/ambient/channels', { preHandler: requireAuth }, async (req: FastifyRequest) =>
+    store.list(req.orgId!)
+  );
 
-  fastify.post('/integrations/ambient/channels', async (req, reply) => {
+  fastify.post('/integrations/ambient/channels', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const body = (req.body ?? {}) as Partial<AmbientChannelInput>;
     const missing = validate(body);
     if (missing.length) return reply.code(400).send({ error: `Missing required field(s): ${missing.join(', ')}` });
 
-    const created = await store.create(ORG_ID, {
+    const created = await store.create(req.orgId!, {
       guildId: body.guildId!,
       channelId: body.channelId!,
       enabled: body.enabled ?? true,
@@ -35,23 +35,23 @@ export default function registerAmbientChannelRoutes(
     return created;
   });
 
-  fastify.patch('/integrations/ambient/channels/:id', async (req, reply) => {
+  fastify.patch('/integrations/ambient/channels/:id', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const { id } = req.params as { id: string };
     const patch = (req.body ?? {}) as Partial<AmbientChannelInput>;
-    const updated = await store.update(ORG_ID, id, patch);
+    const updated = await store.update(req.orgId!, id, patch);
     if (!updated) return reply.code(404).send({ error: 'Ambient channel config not found' });
     await presence.syncConfig(updated); // e.g. disabling leaves the channel immediately
     return updated;
   });
 
-  fastify.delete('/integrations/ambient/channels/:id', async (req) => {
+  fastify.delete('/integrations/ambient/channels/:id', { preHandler: requireAuth }, async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
     await presence.removeConfig(id);
-    await store.delete(ORG_ID, id);
+    await store.delete(req.orgId!, id);
     return { deleted: true, id };
   });
 
   // ── Live status — which ambient rooms are actually connected right now,
   // and each room's activity/session diagnostics. ──
-  fastify.get('/integrations/ambient/status', async () => ({ rooms: presence.listActive() }));
+  fastify.get('/integrations/ambient/status', { preHandler: requireAuth }, async () => ({ rooms: presence.listActive() }));
 }

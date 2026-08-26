@@ -1,9 +1,7 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { ScheduledMeetingStore } from '../scheduling/ScheduledMeetingStore.js';
 import type { ScheduledMeetingInput } from '../scheduling/types.js';
-
-// Matches the single-org simplification used throughout the integrations module.
-const ORG_ID = 'default';
+import { requireAuth } from '../../auth/requireAuth.js';
 
 function validate(body: Partial<ScheduledMeetingInput>): string[] {
   const missing: string[] = [];
@@ -25,14 +23,16 @@ export default function registerScheduleRoutes(
 ): void {
   const { store } = deps;
 
-  fastify.get('/integrations/schedules', async () => store.list(ORG_ID));
+  fastify.get('/integrations/schedules', { preHandler: requireAuth }, async (req: FastifyRequest) =>
+    store.list(req.orgId!)
+  );
 
-  fastify.post('/integrations/schedules', async (req, reply) => {
+  fastify.post('/integrations/schedules', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const body = (req.body ?? {}) as Partial<ScheduledMeetingInput>;
     const missing = validate(body);
     if (missing.length) return reply.code(400).send({ error: `Missing required field(s): ${missing.join(', ')}` });
 
-    const created = await store.create(ORG_ID, {
+    const created = await store.create(req.orgId!, {
       ...(body as ScheduledMeetingInput),
       provider: 'discord',
       enabled: body.enabled ?? true,
@@ -40,17 +40,17 @@ export default function registerScheduleRoutes(
     return created;
   });
 
-  fastify.patch('/integrations/schedules/:id', async (req, reply) => {
+  fastify.patch('/integrations/schedules/:id', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const { id } = req.params as { id: string };
     const patch = (req.body ?? {}) as Partial<ScheduledMeetingInput> & { enabled?: boolean };
-    const updated = await store.update(ORG_ID, id, patch);
+    const updated = await store.update(req.orgId!, id, patch);
     if (!updated) return reply.code(404).send({ error: 'Schedule not found' });
     return updated;
   });
 
-  fastify.delete('/integrations/schedules/:id', async (req) => {
+  fastify.delete('/integrations/schedules/:id', { preHandler: requireAuth }, async (req: FastifyRequest) => {
     const { id } = req.params as { id: string };
-    await store.delete(ORG_ID, id);
+    await store.delete(req.orgId!, id);
     return { deleted: true, id };
   });
 }

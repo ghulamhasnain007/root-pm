@@ -98,11 +98,28 @@ services:
       KAFKA_CLIENT_ID: scrum-master-ai
       PORT: 3001
       HOST: 0.0.0.0
+      # MongoDB — required for scheduling/ambient-assistant/credential
+      # storage; wasn't set here before (those features had no backing
+      # store configured in this compose file at all).
+      MONGODB_URI: mongodb://mongo:27017/scrum-master-ai
+      # Multi-org auth (see src/auth/requireAuth.ts). Set to enforce real
+      # per-org authentication instead of the single-org "default"
+      # fallback. AUTH_SERVICE_INTERNAL_KEY must match auth-service's own
+      # INTERNAL_SERVICE_KEY exactly — both come from the root .env
+      # (env_file above), not hardcoded here.
+      AUTH_SERVICE_URL: http://auth-service:4000
+      AUTH_SERVICE_INTERNAL_KEY: ${AUTH_SERVICE_INTERNAL_KEY:-}
+      AMBIENT_BOOTSTRAP_ORG_ID: ${AMBIENT_BOOTSTRAP_ORG_ID:-default}
+      CREDENTIALS_STORE_DRIVER: ${CREDENTIALS_STORE_DRIVER:-}
     ports:
       - "3001:3001"
     depends_on:
       kafka:
         condition: service_healthy
+      mongo:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
     networks:
       - project-net
 

@@ -4,9 +4,6 @@ import type { CredentialsStore } from '../../store/CredentialsStore.js';
 import { getDiscordClient } from '../../discord/DiscordBotClient.js';
 import { startDiscordMeeting } from '../../discord/DiscordMeetingManager.js';
 
-// Matches the single-org simplification used throughout the integrations module.
-const ORG_ID = 'default';
-
 /** Wakes the bot up at the scheduled time and joins the configured voice channel. */
 export class DiscordLauncher implements MeetingLauncher {
   readonly provider = 'discord';
@@ -14,7 +11,13 @@ export class DiscordLauncher implements MeetingLauncher {
   constructor(private readonly credentialsStore: CredentialsStore) {}
 
   async launch(schedule: ScheduledMeeting): Promise<void> {
-    const creds = await this.credentialsStore.get(ORG_ID, 'discord');
+    // ScheduledMeeting already carries its own orgId (SchedulerService runs
+    // across every org's schedules in one background loop, not per-request
+    // — see SchedulerService's tick(), which calls listAllEnabled() across
+    // all orgs). The credentials store itself was already properly
+    // org-scoped; this just needed to actually pass the schedule's real
+    // org instead of a hardcoded placeholder.
+    const creds = await this.credentialsStore.get(schedule.orgId, 'discord');
     if (!creds?.botToken) {
       throw new Error('Discord is not configured — add its credentials on the Integrations tab first.');
     }

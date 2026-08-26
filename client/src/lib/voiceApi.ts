@@ -2,34 +2,18 @@ import type {
   ProviderInfo, CredentialsResponse, ScheduledMeeting, ScheduledMeetingInput,
   AmbientChannelConfig, AmbientChannelInput, AmbientRoomStatus, AmbientTask,
 } from '../types/integrations.js';
+import { authFetch, ApiError } from './authFetch.js';
 
-export class ApiError extends Error {
-  constructor(message: string, public readonly status: number) {
-    super(message);
-  }
-}
+export { ApiError };
 
 const API_BASE = import.meta.env.VITE_VOICE_API ?? '';
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-
-  if (init?.body != null) {
-    headers.set('Content-Type', 'application/json');
-  }
-
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers,
-  });
-
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(body.error ?? `Request to ${path} failed (${res.status})`, res.status);
-  }
-
-  return res.json() as Promise<T>;
-}
+// Every call here now goes through authFetch — scrum-master-ai's routes
+// require a valid auth-service JWT (see backend/src/auth/requireAuth.ts).
+// This previously sent no Authorization header at all, which worked only
+// because those routes didn't check for one either; now that both sides
+// enforce it, this needed to change to match.
+const req = <T>(path: string, init?: RequestInit): Promise<T> => authFetch(API_BASE, path, init);
 
 export const integrationsApi = {
   listProviders: () => req<ProviderInfo[]>('/integrations/providers'),
@@ -59,8 +43,20 @@ export const integrationsApi = {
       method: 'DELETE',
     }),
 
-  /** Not a fetch — this navigates the whole page through the OAuth consent screen. */
-  connectUrl: (provider: string) => `${API_BASE}/integrations/${provider}/connect`,
+  /**
+   * Starts the OAuth connect flow. This used to be a plain `<a href>` GET
+   * that the backend answered with a raw HTTP redirect — but a direct
+   * browser navigation can't carry an Authorization header, and the
+   * backend needs to know which org is connecting (to sign the right
+   * orgId into the OAuth `state` parameter it verifies on callback). So
+   * this is now a two-step flow: an authenticated fetch (this function)
+   * that returns the provider's OAuth URL as JSON, then the caller
+   * navigates the browser there itself — see IntegrationsPage.tsx's
+   * connect handler. The callback route itself still needs no
+   * authentication: it derives orgId from the signed `state` value it
+   * gets back from the provider, not from a token.
+   */
+  connect: (provider: string) => req<{ url: string }>(`/integrations/${provider}/connect`),
 };
 
 export interface DiscordVoiceChannel { id: string; name: string; memberCount: number }

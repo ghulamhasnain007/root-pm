@@ -3,7 +3,7 @@ import { integrationsApi } from '../../lib/voiceApi.js';
 import { DiscordMeetingPanel } from './DiscordMeetingPanel.js';
 import type { ProviderInfo, CredentialField } from '../../types/integrations.js';
 import {
-  Button, LinkButton, StatusBadge, Pill, Card, PageHeader, Field, Switch, Banner, Spinner,
+  Button, StatusBadge, Pill, Card, PageHeader, Field, Switch, Banner, Spinner,
 } from '../../components/ui/index.js';
 
 const CAPABILITY_LABEL: Record<string, string> = {
@@ -103,6 +103,16 @@ function ProviderCard({ provider, onChange }: { provider: ProviderInfo; onChange
     finally { setBusy(false); }
   };
 
+  const connect = async () => {
+    setBusy(true);
+    try {
+      const { url } = await integrationsApi.connect(provider.id);
+      window.location.href = url; // hand off to the provider's OAuth consent screen
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Card className="space-y-4">
       <div className="flex items-start justify-between gap-3">
@@ -143,9 +153,9 @@ function ProviderCard({ provider, onChange }: { provider: ProviderInfo; onChange
           </>
         ) : provider.configured ? (
           <>
-            <LinkButton variant="primary" size="sm" href={integrationsApi.connectUrl(provider.id)}>
+            <Button variant="primary" size="sm" onClick={connect} disabled={busy}>
               Connect via OAuth
-            </LinkButton>
+            </Button>
             <Button variant="secondary" size="sm" onClick={() => setExpanded((v) => !v)}>
               {expanded ? 'Hide credentials' : 'Edit credentials'}
             </Button>

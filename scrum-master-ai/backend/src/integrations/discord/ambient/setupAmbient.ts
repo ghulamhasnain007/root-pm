@@ -21,9 +21,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { config, isTaigaConfigured } from '../../../config/index.js';
 import { TaigaTaskStore } from '../../../services/tasks/TaigaTaskStore.js';
 
-// Matches the single-org simplification used throughout the integrations
-// module.
-const ORG_ID = 'default';
+// orgId is now passed explicitly by the caller — see setupAmbientAssistant's
+// deps param and its doc comment above.
 
 /**
  * Wires the ambient-assistant module into the existing Fastify app.
@@ -44,10 +43,24 @@ const ORG_ID = 'default';
  * - If KAFKA_BROKERS is not configured, the existing MongoTaskStore is used
  *   and the ambient assistant continues to work without Kafka.
  */
+/**
+ * IMPORTANT — boot-time, single-org constraint (see the multi-tenancy
+ * review notes): this function wires up exactly ONE ambient assistant
+ * instance, bound to ONE already-connected Discord client, called ONCE at
+ * process boot (see integrations/index.ts's call site). `orgId` used to be
+ * a hardcoded module-level constant here; it's now an explicit required
+ * parameter instead — an honest improvement (no more silently-hidden
+ * default), but not the same as true multi-org support. Fully dynamizing
+ * this would mean calling setupAmbientAssistant() once per org discovered
+ * by BotConnectionManager, each with that org's own Discord client, rather
+ * than once globally — a larger structural change, tracked as follow-up,
+ * not attempted here.
+ */
 export async function setupAmbientAssistant(
   fastify: FastifyInstance,
-  deps: { discordClient: Client }
+  deps: { discordClient: Client; orgId: string }
 ): Promise<void> {
+  const { orgId } = deps;
   const channelStore = new MongoAmbientChannelStore();
 
   // ── Kafka setup ───────────────────────────────────────────────────────────
@@ -69,7 +82,7 @@ export async function setupAmbientAssistant(
     ? new MeetingEventPublisher(kafkaProducer, {
         channelId: 'ambient',
         channelName: 'ambient',
-        orgId: ORG_ID,
+        orgId,
       })
     : null;
 
@@ -93,7 +106,7 @@ export async function setupAmbientAssistant(
     : kafkaProducer
       ? new KafkaTaskStore(
           kafkaProducer,
-          ORG_ID,
+          orgId,
           () => meetingPublisher?.getMeetingId()
         )
       : new MongoTaskStore();
@@ -106,7 +119,7 @@ export async function setupAmbientAssistant(
   const originalHandle = (call: any, ctx: any) =>
     handleAmbientFunctionCall(
       taskStore,
-      ORG_ID,
+      orgId,
       ctx.channelId,
       ctx.speakerName,
       call

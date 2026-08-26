@@ -4,14 +4,7 @@ import type { OAuthService } from '../OAuthService.js';
 import type { IntegrationStore } from '../store/IntegrationStore.js';
 import type { CredentialsStore } from '../store/CredentialsStore.js';
 import { getIntegrationBaseUrl } from '../utils/getIntegrationBaseUrl.js';
-
-// This app runs as a single organization/workspace (matching the rest of
-// the app's "one shared room" simplification) — there's no per-user login
-// to derive a real orgId/userId from. To extend this to true multi-tenant
-// later: derive ORG_ID from an authenticated session instead of this
-// constant, and everything else (routes, stores) already takes orgId as a
-// parameter, so no other changes would be needed.
-const ORG_ID = 'default';
+import { requireAuth } from '../../auth/requireAuth.js';
 
 export default function registerIntegrationRoutes(
   fastify: FastifyInstance,
@@ -20,12 +13,12 @@ export default function registerIntegrationRoutes(
   const { oauth, store, credentialsStore } = deps;
 
   // ── List providers: schema + configuration + connection status ─────────────
-  fastify.get('/integrations/providers', async () => {
-    const connections = await store.listConnections(ORG_ID);
+  fastify.get('/integrations/providers', { preHandler: requireAuth }, async (req: FastifyRequest) => {
+    const connections = await store.listConnections(req.orgId!);
 
     return Promise.all(providerRegistry.list().map(async (factory) => {
       const conn = connections.find((c) => c.provider === factory.id);
-      const configured = await credentialsStore.isConfigured(ORG_ID, factory.id);
+      const configured = await credentialsStore.isConfigured(req.orgId!, factory.id);
       return {
         id: factory.id,
         displayName: factory.displayName,
@@ -44,7 +37,7 @@ export default function registerIntegrationRoutes(
   });
 
   // ── Save app credentials (Client ID/Secret/etc) for a provider ──────────────
-  fastify.post('/integrations/:provider/credentials', async (req, reply) => {
+  fastify.post('/integrations/:provider/credentials', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const { provider } = req.params as { provider: string };
     if (!providerRegistry.has(provider)) return reply.code(404).send({ error: `Unknown provider: ${provider}` });
 
@@ -56,17 +49,17 @@ export default function registerIntegrationRoutes(
       return reply.code(400).send({ error: `Missing required field(s): ${missing.map((f) => f.label).join(', ')}` });
     }
 
-    await credentialsStore.save(ORG_ID, provider, body);
+    await credentialsStore.save(req.orgId!, provider, body);
     return { provider, configured: true };
   });
 
   // ── Read back saved credentials (non-secret fields only) ────────────────────
-  fastify.get('/integrations/:provider/credentials', async (req, reply) => {
+  fastify.get('/integrations/:provider/credentials', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const { provider } = req.params as { provider: string };
     if (!providerRegistry.has(provider)) return reply.code(404).send({ error: `Unknown provider: ${provider}` });
 
     const factory = providerRegistry.getFactory(provider);
-    const creds = await credentialsStore.get(ORG_ID, provider);
+    const creds = await credentialsStore.get(req.orgId!, provider);
     if (!creds) return { configured: false, values: {} };
 
     // Secret fields are never echoed back once saved — the settings form
@@ -80,30 +73,48 @@ export default function registerIntegrationRoutes(
   });
 
   // ── Clear saved credentials (also drops any live connection) ────────────────
-  fastify.delete('/integrations/:provider/credentials', async (req, reply) => {
+  fastify.delete('/integrations/:provider/credentials', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const { provider } = req.params as { provider: string };
     if (!providerRegistry.has(provider)) return reply.code(404).send({ error: `Unknown provider: ${provider}` });
 
-    await credentialsStore.delete(ORG_ID, provider);
-    await store.deleteConnection(ORG_ID, provider);
+    await credentialsStore.delete(req.orgId!, provider);
+    await store.deleteConnection(req.orgId!, provider);
     return { provider, configured: false };
   });
 
   // ── Start OAuth connect flow ────────────────────────────────────────────────
-  fastify.get('/integrations/:provider/connect', async (req, reply) => {
+  // Returns the provider's OAuth URL as JSON rather than answering with a
+  // raw HTTP redirect. A plain browser navigation (which a redirect
+  // response is meant to be followed by, via a plain <a href>) can't carry
+  // an Authorization header — there'd be no way to know which org is
+  // connecting, and thus no way to sign the right orgId into the OAuth
+  // `state` parameter this verifies on callback. The client now does an
+  // authenticated fetch here first, then navigates the browser to the
+  // returned URL itself — see client/src/pages/voice/IntegrationsPage.tsx's
+  // connect handler and client/src/lib/voiceApi.ts's connect().
+  fastify.get('/integrations/:provider/connect', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const { provider } = req.params as { provider: string };
     if (!providerRegistry.has(provider)) return reply.code(404).send({ error: `Unknown provider: ${provider}` });
 
     try {
       const baseUrl = getIntegrationBaseUrl(req);
-      const url = await oauth.startConnect(provider, ORG_ID, baseUrl);
-      return reply.redirect(url);
+      const url = await oauth.startConnect(provider, req.orgId!, baseUrl);
+      return { url };
     } catch (err) {
       return reply.code(400).send({ error: err instanceof Error ? err.message : 'Failed to start OAuth flow' });
     }
   });
 
   // ── OAuth callback — redirects back into the app's UI either way ────────────
+  // Deliberately NOT gated by requireAuth: the OAuth provider (Discord,
+  // Zoom, ...) redirects the user's browser back here directly, and has no
+  // way to attach our JWT to that redirect — this route was never supposed
+  // to need one. Its actual authorization mechanism is the `state`
+  // parameter, which OAuthService.startConnect signs (HMAC) with the real
+  // orgId embedded in it above, and which handleCallback verifies
+  // (signature + short TTL) before trusting anything in it — so this
+  // route already derives orgId correctly, from the one place a
+  // provider-initiated redirect actually can carry authenticated context.
   fastify.get('/integrations/:provider/callback', async (req, reply) => {
     const { provider } = req.params as { provider: string };
     const { code, state, error } = req.query as { code?: string; state?: string; error?: string };
@@ -122,30 +133,49 @@ export default function registerIntegrationRoutes(
   });
 
   // ── Toggle enabled/disabled without disconnecting ────────────────────────────
-  fastify.post('/integrations/:provider/toggle', async (req, reply) => {
+  fastify.post('/integrations/:provider/toggle', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const { provider } = req.params as { provider: string };
     const { enabled } = (req.body ?? {}) as { enabled: boolean };
     if (!providerRegistry.has(provider)) return reply.code(404).send({ error: `Unknown provider: ${provider}` });
 
-    await store.setEnabled(ORG_ID, provider, enabled);
+    await store.setEnabled(req.orgId!, provider, enabled);
     return { provider, enabled };
   });
 
   // ── Disconnect (revoke + delete stored tokens, keeps saved credentials) ─────
-  fastify.delete('/integrations/:provider', async (req, reply) => {
+  fastify.delete('/integrations/:provider', { preHandler: requireAuth }, async (req: FastifyRequest, reply) => {
     const { provider } = req.params as { provider: string };
     if (!providerRegistry.has(provider)) return reply.code(404).send({ error: `Unknown provider: ${provider}` });
 
-    await oauth.disconnect(ORG_ID, provider);
+    await oauth.disconnect(req.orgId!, provider);
     return { provider, disconnected: true };
   });
 
   // ── Provider webhooks — signature-verified per adapter ───────────────────────
+  // NOT gated by requireAuth: this is called BY the third-party provider's
+  // own servers (Zoom, etc.), which will never have our JWT — its security
+  // model is per-adapter webhook signature verification (adapter.verifyWebhook
+  // below), a completely different, already-correct mechanism.
+  //
+  // KNOWN REMAINING GAP: unlike every route above, there is currently no
+  // way to know which ORG a given inbound webhook belongs to — this route
+  // isn't scoped by org in its URL, and a provider's webhook payload isn't
+  // guaranteed to carry an identifier this app can map back to one of our
+  // orgs. Closing this properly needs one of: (a) per-org webhook URLs
+  // (e.g. /integrations/:provider/webhook/:orgId, configured as each org's
+  // distinct callback URL with the provider), or (b) resolving org from an
+  // identifier already present in the payload (e.g. a Zoom account ID that
+  // was recorded against a specific org's connection at OAuth-connect
+  // time). Neither is implemented — this still resolves credentials via a
+  // single fixed org until one of those is built. Left as an explicit
+  // constant (not a request-derived value) specifically so this doesn't
+  // silently look "fixed" alongside the routes above that genuinely are.
+  const WEBHOOK_ORG_ID_UNRESOLVED = 'default';
   fastify.post('/integrations/:provider/webhook', { config: { rawBody: true } }, async (req: FastifyRequest, reply) => {
     const { provider } = req.params as { provider: string };
     if (!providerRegistry.has(provider)) return reply.code(404).send({ error: `Unknown provider: ${provider}` });
 
-    const credentials = await credentialsStore.get(ORG_ID, provider);
+    const credentials = await credentialsStore.get(WEBHOOK_ORG_ID_UNRESOLVED, provider);
     if (!credentials) return reply.code(400).send({ error: `${provider} is not configured` });
 
     const adapter = providerRegistry.buildAdapter(provider, credentials);

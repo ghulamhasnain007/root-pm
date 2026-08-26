@@ -1,11 +1,13 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// Two backends, kept explicitly separate (see src/lib/configApi.ts and
-// src/lib/voiceApi.ts) — this proxy just routes each path prefix to the
-// right one in dev. In production, nginx.conf does the equivalent routing.
+// Three backends, kept explicitly separate (see src/lib/configApi.ts,
+// src/lib/voiceApi.ts, src/lib/authApi.ts) — this proxy just routes each
+// path prefix to the right one in dev. In production, nginx.conf does the
+// equivalent routing.
 const VOICE_API = process.env.VITE_VOICE_API ?? 'http://localhost:3001'
 const CONFIG_API = process.env.VITE_CONFIG_API ?? 'http://localhost:8000'
+const AUTH_API = process.env.VITE_AUTH_API ?? 'http://localhost:4000'
 
 export default defineConfig({
   plugins: [react()],
@@ -30,6 +32,20 @@ export default defineConfig({
       '/ws': {
         target: VOICE_API,
         ws: true,
+      },
+      // auth-service (org registration, login, staff, tool config) — no
+      // /api prefix, that's already config-api's namespace above.
+      '/auth': {
+        target: AUTH_API,
+        changeOrigin: true,
+      },
+      '/orgs': {
+        target: AUTH_API,
+        changeOrigin: true,
+      },
+      '/.well-known': {
+        target: AUTH_API,
+        changeOrigin: true,
       },
     },
   },

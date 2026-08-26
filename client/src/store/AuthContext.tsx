@@ -1,9 +1,30 @@
 /**
  * store/AuthContext.tsx — React context for authentication state.
- * Manages JWT storage, user info, and org context.
+ *
+ * Two fixes over an earlier version, both about multi-tab correctness:
+ *
+ * 1. Subscribes to tokenStore's cross-tab change events (see
+ *    tokenStore.ts's file header for the full explanation) — a login,
+ *    logout, or token refresh in ANY open tab now updates this tab's
+ *    `user` state immediately, without needing a reload. Previously each
+ *    tab's auth state was set once on mount and never revisited.
+ *
+ * 2. On mount, if the stored access token is already expired, proactively
+ *    attempts a refresh (using the stored refresh token) BEFORE deciding
+ *    whether the user is authenticated — rather than optimistically
+ *    decoding and trusting a token whose signature/expiry this client
+ *    never actually validates. A tab opened after the access token's
+ *    15-minute TTL has quietly elapsed since the last activity now
+ *    silently refreshes instead of flashing into a "not authenticated"
+ *    state (or worse, briefly *appearing* authenticated on stale decoded
+ *    data, then failing on the first real API call).
  */
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import { authApi } from '../lib/authApi';
+import {
+  getAccessToken, isAccessTokenExpired, parseJwtPayload, saveTokens, subscribeToTokenChanges,
+} from '../lib/tokenStore';
+import { AUTH_BASE } from '../lib/authBase';
 
 interface AuthUser {
   userId: string;
@@ -30,20 +51,6 @@ const AuthContext = createContext<AuthContextValue>({
   logout: async () => {},
 });
 
-/**
- * Decodes a JWT payload. JWTs use base64URL encoding (RFC 4648 §5: `-`/`_`
- * instead of `+`/`/`, no padding) — calling the browser's atob() directly on
- * that (as an earlier version of this file did, in two places) is a bug:
- * atob() decodes standard base64 only, and will throw or silently misdecode
- * on any payload containing the substituted characters. This converts
- * base64url → base64 first.
- */
-function parseJwtPayload(token: string): { sub?: string; userId?: string; orgId?: string; role?: string; email?: string } {
-  const base64Url = token.split('.')[1];
-  const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/').padEnd(base64Url.length + (4 - (base64Url.length % 4)) % 4, '=');
-  return JSON.parse(atob(base64));
-}
-
 function userFromToken(token: string): AuthUser {
   const payload = parseJwtPayload(token);
   return {
@@ -54,20 +61,69 @@ function userFromToken(token: string): AuthUser {
   };
 }
 
+/** Re-reads tokenStore's current access token and updates React state
+ * accordingly — the single function both the mount effect and the
+ * cross-tab subscription call, so there's one code path for "sync my
+ * state to whatever tokenStore currently has," not two that could drift. */
+function syncFromStore(setUser: (u: AuthUser | null) => void) {
+  const token = getAccessToken();
+  if (!token) {
+    setUser(null);
+    return;
+  }
+  try {
+    setUser(userFromToken(token));
+  } catch {
+    authApi.clearAuth();
+    setUser(null);
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const token = authApi.getAccessToken();
-    if (token) {
-      try {
-        setUser(userFromToken(token));
-      } catch {
-        authApi.clearAuth();
+    let cancelled = false;
+
+    (async () => {
+      if (getAccessToken() && isAccessTokenExpired()) {
+        // Try to get a fresh access token before deciding auth state —
+        // see file header, point 2.
+        try {
+          const rt = localStorage.getItem('refreshToken');
+          if (rt) {
+            const resp = await fetch(`${AUTH_BASE}/auth/refresh`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ refreshToken: rt }),
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              saveTokens(data);
+            } else {
+              authApi.clearAuth();
+            }
+          }
+        } catch {
+          // Network error, auth-service unreachable, etc. — fall through
+          // and let syncFromStore below decide based on whatever's left.
+        }
       }
-    }
-    setIsLoading(false);
+      if (!cancelled) {
+        syncFromStore(setUser);
+        setIsLoading(false);
+      }
+    })();
+
+    // Cross-tab: another tab's login/logout/refresh updates this tab's
+    // state immediately, no reload needed.
+    const unsubscribe = subscribeToTokenChanges(() => syncFromStore(setUser));
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
